@@ -73,7 +73,13 @@ describe('HTTP /stats Endpoint', () => {
     expect(response.status).toBe(200);
 
     const json = (await response.json()) as RelayStatsResponse;
-    expect(json.upstreams.configured).toContain('wss://relay.damus.io');
+    expect(json.upstreams.configured).toEqual([
+      'wss://relay.primal.net',
+      'wss://relay.damus.io',
+      'wss://relay.ditto.pub',
+      'wss://relay.emre.xyz',
+      'wss://relay.nostr.org.tr',
+    ]);
     expect(json.upstreams.timeout_ms).toBe(5000);
   });
 

@@ -9,9 +9,11 @@ import { UpstreamRelayClient, type WebSocketFactory } from './relay-client';
 import { filterValidRelayUrls } from './url-validator';
 
 export const DEFAULT_UPSTREAM_RELAYS = [
+  'wss://relay.primal.net',
   'wss://relay.damus.io',
-  'wss://nos.lol',
-  'wss://relay.nostr.band',
+  'wss://relay.ditto.pub',
+  'wss://relay.emre.xyz',
+  'wss://relay.nostr.org.tr',
 ];
 
 export const DEFAULT_UPSTREAM_TIMEOUT_MS = 5000;

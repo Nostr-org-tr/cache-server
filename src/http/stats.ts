@@ -1,4 +1,5 @@
 import type { Env } from '../types/env';
+import { DEFAULT_UPSTREAM_RELAYS } from '../upstream/pool-manager';
 import { APP_NAME, APP_VERSION } from '../version';
 import { jsonResponse } from './cors';
 
@@ -66,7 +67,7 @@ export async function handleStatsRequest(env: Env): Promise<Response> {
     // Parse configured upstreams
     const upstreamRelays = env.UPSTREAM_RELAYS
       ? env.UPSTREAM_RELAYS.split(',').map((u) => u.trim()).filter(Boolean)
-      : ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.nostr.band'];
+      : DEFAULT_UPSTREAM_RELAYS;
 
     const timeoutMs = parseInt(env.UPSTREAM_TIMEOUT_MS || '5000', 10);
 
