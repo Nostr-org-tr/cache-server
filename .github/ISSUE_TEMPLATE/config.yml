@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Nostr Community Contact
+    url: https://cache.nostr.org.tr
+    about: Visit the regional cache relay live portal.
+  - name: Email Support & Inquiries
+    url: mailto:admin@nostr.org.tr
+    about: Contact the Nostr Turkey maintainers directly.

@@ -39,5 +39,33 @@
   "engines": {
     "node": ">=20.0.0"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Nostr-org-tr/cache-server.git"
+  },
+  "homepage": "https://cache.nostr.org.tr",
+  "bugs": {
+    "url": "https://github.com/Nostr-org-tr/cache-server/issues"
+  },
+  "author": "Emre YILMAZ <z@emre.xyz> (https://emre.xyz)",
+  "contributors": [
+    "Emre YILMAZ <z@emre.xyz>"
+  ],
+  "keywords": [
+    "nostr",
+    "relay",
+    "cache",
+    "cloudflare-workers",
+    "durable-objects",
+    "cloudflare-d1",
+    "bip-340",
+    "schnorr",
+    "nip-01",
+    "nip-09",
+    "nip-11",
+    "nip-16",
+    "nip-33",
+    "nip-65"
+  ],
   "license": "MIT"
 }

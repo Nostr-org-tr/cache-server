@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { buildNip11Document, handleNip11Request } from '../../src/http/nip11';
 import type { Env } from '../../src/types/env';
 import type { Nip11RelayInformation } from '../../src/types/nostr';
-import { APP_VERSION } from '../../src/version';
+import { APP_VERSION, APP_REPOSITORY } from '../../src/version';
 import { MockD1Database } from '../mocks/mock-d1';
 
 describe('NIP-11 Relay Information Document', () => {
@@ -21,7 +21,7 @@ describe('NIP-11 Relay Information Document', () => {
     expect(doc.pubkey).toBe('');
     expect(doc.contact).toBe('admin@nostr.org.tr');
     expect(doc.supported_nips).toEqual([1, 9, 11, 16, 20, 33]);
-    expect(doc.software).toBe('https://github.com/delirehberi/cache.nostr.org.tr');
+    expect(doc.software).toBe(APP_REPOSITORY);
     expect(doc.version).toBe(APP_VERSION);
     expect(doc.limitation).toBeDefined();
     expect(doc.limitation?.max_message_length).toBe(65536);

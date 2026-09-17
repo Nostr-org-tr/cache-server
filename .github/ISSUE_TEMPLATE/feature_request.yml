@@ -1,0 +1,39 @@
+name: Feature Request
+description: Propose a new feature, NIP protocol support, or caching improvement.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for suggesting a feature! Please provide clear rationale and protocol context.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement / Use Case
+      description: Is your feature request related to a specific client problem or edge latency optimization?
+      placeholder: I encounter latency issues when...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: Proposed Solution / NIP Implementation
+      description: Describe the solution you would like to see implemented.
+      placeholder: Implement support for NIP-XX / Add upstream fallback strategy...
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Describe any alternative solutions or features you've considered.
+      placeholder: Considered querying upstream relays directly from client...
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional Context / Protocol References
+      description: Add any other context, NIP documentation links, or examples here.

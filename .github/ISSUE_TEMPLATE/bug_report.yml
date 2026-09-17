@@ -1,0 +1,56 @@
+name: Bug Report
+description: Report a reproducible bug, protocol error, or unexpected behavior.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug! Please ensure you have searched existing issues to verify this bug has not already been reported.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of the bug.
+      placeholder: Describe what happened...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Steps or commands to reproduce the issue (e.g. using `nak` or WebSocket frames).
+      placeholder: |
+        1. Connect WebSocket to wss://cache.nostr.org.tr
+        2. Send REQ frame: ["REQ", "sub1", {"kinds": [1], "limit": 1}]
+        3. Observe response...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What you expected to happen according to Nostr NIP specifications.
+      placeholder: Expected to receive...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error Logs or WebSocket Frames
+      description: Paste any relevant terminal logs, stack traces, or captured WebSocket frames.
+      render: shell
+
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment
+      options:
+        - Production (https://cache.nostr.org.tr)
+        - Local Development (`wrangler dev` / `make dev`)
+        - Staging / Custom Deployment
+    validations:
+      required: true
