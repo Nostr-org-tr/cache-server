@@ -1,0 +1,51 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cache-nostr-org-tr",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-02-14",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "nostr_cache_db",
+      "database_id": "6009d0a9-1d83-4c6b-a741-f6f4326e8102",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CLIENT_SESSION",
+        "class_name": "ClientSession"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "ClientSession"
+      ]
+    }
+  ],
+  "routes": [
+    {
+      "pattern": "cache.nostr.org.tr",
+      "custom_domain": true
+    }
+  ],
+  "vars": {
+    "RELAY_NAME": "Nostr Turkey Regional Cache",
+    "RELAY_DESCRIPTION": "High-Performance Regional Edge-Caching Nostr Relay (Read-only cache. Direct writes are not allowed.)",
+    "RELAY_PUBKEY": "46f3c7bb33cc3019049b76dc89dbb96e34c247bdda68b6ad8632682793ff8a1a",
+    "RELAY_CONTACT": "admin@nostr.org.tr",
+    "UPSTREAM_RELAYS": "wss://relay.damus.io,wss://nos.lol,wss://relay.nostr.band",
+    "UPSTREAM_TIMEOUT_MS": "5000",
+    "RATE_LIMIT_IP_HANDSHAKE_PER_MIN": "120",
+    "RATE_LIMIT_MSG_PER_WINDOW": "300",
+    "RATE_LIMIT_PUBKEY_WRITES_PER_MIN": "60",
+    "ALLOW_DIRECT_WRITES": "false"
+  }
+}

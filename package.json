@@ -1,0 +1,43 @@
+{
+  "name": "cache.nostr.org.tr",
+  "version": "1.0.0",
+  "description": "High-Performance Pull-Through Cache Nostr Relay on Cloudflare Workers, Durable Objects, and Cloudflare D1",
+  "main": "src/index.ts",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "build": "tsc --noEmit && wrangler deploy --dry-run --outdir dist",
+    "lint": "npm run version:check && tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "bench": "vitest run tests/benchmarks",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "version:check": "node --experimental-strip-types scripts/check-version-sync.ts",
+    "version:bump": "node --experimental-strip-types scripts/bump-version.ts",
+    "version:patch": "node --experimental-strip-types scripts/bump-version.ts patch",
+    "version:minor": "node --experimental-strip-types scripts/bump-version.ts minor",
+    "version:major": "node --experimental-strip-types scripts/bump-version.ts major",
+    "version:set": "node --experimental-strip-types scripts/bump-version.ts",
+    "db:create": "wrangler d1 create nostr_cache_db",
+    "db:migrate:local": "wrangler d1 migrations apply nostr_cache_db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply nostr_cache_db --remote",
+    "verify:live": "node --experimental-strip-types scripts/verify-relay.ts"
+  },
+  "dependencies": {
+    "@noble/curves": "^1.8.1",
+    "@noble/hashes": "^1.7.1"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250214.0",
+    "@types/node": "^22.13.4",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.7",
+    "wrangler": "^3.109.2"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "license": "MIT"
+}
