@@ -1,6 +1,13 @@
 SHELL := /bin/bash
 .SHELLFLAGS := -e -o pipefail -c
-NVM_EXEC := [ -s "$$HOME/.nvm/nvm.sh" ] && . "$$HOME/.nvm/nvm.sh" && nvm use
+NVM_EXEC := if [ -s "$$HOME/.nvm/nvm.sh" ]; then . "$$HOME/.nvm/nvm.sh"; fi; \
+	NVMRC_VER=$$(cat .nvmrc 2>/dev/null | tr -d 'v \r\n'); \
+	ACTIVE_VER=$$(node -v 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/'); \
+	if [ -n "$$NVMRC_VER" ] && [ "$$ACTIVE_VER" = "$$NVMRC_VER" ]; then \
+		true; \
+	elif command -v nvm >/dev/null 2>&1; then \
+		nvm use || nvm install; \
+	fi
 
 .PHONY: all install dev build test test-watch bench lint db-create db-migrate-local db-migrate-remote deploy tail verify-live clean version-check version-bump version-patch version-minor version-major version-set
 
