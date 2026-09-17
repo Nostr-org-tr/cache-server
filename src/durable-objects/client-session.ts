@@ -1,6 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
+import { putEventToKv } from '../cache';
 import { verifyEventCrypto } from '../crypto';
-import { countEvents, queryEvents, saveEvent, saveEventsBatch } from '../db';
+import { countEvents, queryEventsHybrid, saveEvent, saveEventsBatch } from '../db';
 import {
   formatClosedMessage,
   formatCountMessage,
@@ -206,10 +207,15 @@ export class ClientSession extends DurableObject<Env> {
         const sentSet = new Set<string>();
         this.sentEventIds.set(subId, sentSet);
 
-        // 1. Query local D1 cache for matching events
-        const storedEvents = await queryEvents(this.env.DB, filters, {
-          maxLimit: MAX_QUERY_LIMIT,
-        });
+        // 1. Query L1 KV cache and/or local D1 for matching events
+        const storedEvents = await queryEventsHybrid(
+          this.env.DB,
+          this.env.CACHE_KV,
+          filters,
+          {
+            maxLimit: MAX_QUERY_LIMIT,
+          }
+        );
 
         // 2. Stream matching cached events to client with deduplication
         for (const event of storedEvents) {
@@ -233,7 +239,12 @@ export class ClientSession extends DurableObject<Env> {
           }
 
           const [authorRelays, filterHints] = await Promise.all([
-            resolveAuthorRelaysFromD1(this.env.DB, authorPubkeys),
+            resolveAuthorRelaysFromD1(
+              this.env.DB,
+              authorPubkeys,
+              undefined,
+              this.env.CACHE_KV
+            ),
             Promise.resolve(extractRelayHintsFromFilters(filters)),
           ]);
 
@@ -261,13 +272,13 @@ export class ClientSession extends DurableObject<Env> {
         // 5. Emit EOSE to client once all upstream relays complete or time out
         ws.send(formatEoseMessage(subId));
 
-        // 6. Asynchronously persist newly pulled non-ephemeral events into D1
+        // 6. Asynchronously persist newly pulled non-ephemeral events into D1 and L1 KV
         if (pullResult.events.length > 0) {
           const nonEphemeral = pullResult.events.filter(
             (e) => !(e.kind >= 20000 && e.kind < 30000)
           );
           if (nonEphemeral.length > 0) {
-            await saveEventsBatch(this.env.DB, nonEphemeral);
+            await saveEventsBatch(this.env.DB, nonEphemeral, this.env.CACHE_KV);
           }
         }
 
@@ -318,8 +329,11 @@ export class ClientSession extends DurableObject<Env> {
         const isEphemeral = event.kind >= 20000 && event.kind < 30000;
 
         if (!isEphemeral) {
-          // Persist to D1 storage
+          // Persist to D1 storage and warm L1 KV cache
           await saveEvent(this.env.DB, event);
+          if (this.env.CACHE_KV) {
+            void putEventToKv(this.env.CACHE_KV, event);
+          }
         }
 
         // Broadcast to active subscriptions matching filter criteria

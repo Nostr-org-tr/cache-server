@@ -14,6 +14,12 @@
       "migrations_dir": "migrations"
     }
   ],
+  "kv_namespaces": [
+    {
+      "binding": "CACHE_KV",
+      "id": "648fcf7c485c4bfb9ceaa020d58a5b28"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {
@@ -36,6 +42,11 @@
       "custom_domain": true
     }
   ],
+  "triggers": {
+    "crons": [
+      "0 3 * * *"
+    ]
+  },
   "vars": {
     "RELAY_NAME": "Nostr Turkey Regional Cache",
     "RELAY_DESCRIPTION": "High-Performance Regional Edge-Caching Nostr Relay (Read-only cache. Direct writes are not allowed.)",

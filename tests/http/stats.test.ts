@@ -58,6 +58,9 @@ describe('HTTP /stats Endpoint', () => {
       { kind: 1, count: 2 },
       { kind: 0, count: 1 },
     ]);
+    expect(json.gc).toBeDefined();
+    expect(json.gc.schedule).toBe('Daily at 03:00 UTC (0 3 * * *)');
+    expect(json.gc.tiers.length).toBeGreaterThan(0);
     expect(json.upstreams.configured).toEqual(['wss://relay.damus.io', 'wss://nos.lol']);
     expect(json.upstreams.timeout_ms).toBe(4000);
   });

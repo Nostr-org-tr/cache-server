@@ -1,3 +1,4 @@
+import { DEFAULT_GC_TIERS } from '../db/gc';
 import type { Env } from '../types/env';
 import { DEFAULT_UPSTREAM_RELAYS } from '../upstream/pool-manager';
 import { APP_NAME, APP_VERSION } from '../version';
@@ -16,6 +17,10 @@ export interface RelayStatsResponse {
     total_events: number;
     total_tags: number;
     kind_distribution: KindDistribution[];
+  };
+  gc: {
+    schedule: string;
+    tiers: Array<{ name: string; ttl_days: number }>;
   };
   upstreams: {
     configured: string[];
@@ -79,6 +84,13 @@ export async function handleStatsRequest(env: Env): Promise<Response> {
         total_events: totalEvents,
         total_tags: totalTags,
         kind_distribution: kindDistribution,
+      },
+      gc: {
+        schedule: 'Daily at 03:00 UTC (0 3 * * *)',
+        tiers: DEFAULT_GC_TIERS.map((t) => ({
+          name: t.name,
+          ttl_days: Math.round(t.ttlSeconds / 86400),
+        })),
       },
       upstreams: {
         configured: upstreamRelays,

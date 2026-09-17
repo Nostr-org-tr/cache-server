@@ -267,21 +267,43 @@ export class MockD1PreparedStatement implements D1PreparedStatement {
       return { results: [], success: true, meta: createMockMeta({ rows_written: 1, changes: 1 }) };
     }
 
-    // DELETE FROM events WHERE id IN (...) AND pubkey = ?
-    if (q.startsWith('DELETE FROM events WHERE id IN')) {
-      const pubkey = (this.boundParams[this.boundParams.length - 1] as string | undefined) ?? '';
-      const idsToDelete = this.boundParams.slice(0, -1) as string[];
-      let deletedCount = 0;
-
-      for (const id of idsToDelete) {
-        const ev = this.db.events.get(id);
-        if (ev && ev.pubkey.toLowerCase() === pubkey.toLowerCase()) {
-          this.db.events.delete(id);
-          this.db.eventTags = this.db.eventTags.filter((t) => t.event_id !== id);
-          deletedCount++;
-        }
-      }
+    // DELETE FROM event_tags WHERE event_id IN (...)
+    if (q.startsWith('DELETE FROM event_tags WHERE event_id IN')) {
+      const idsToDelete = this.boundParams as string[];
+      const initialCount = this.db.eventTags.length;
+      this.db.eventTags = this.db.eventTags.filter((t) => !idsToDelete.includes(t.event_id));
+      const deletedCount = initialCount - this.db.eventTags.length;
       return { results: [], success: true, meta: createMockMeta({ rows_written: deletedCount, changes: deletedCount }) };
+    }
+
+    // DELETE FROM events WHERE id IN (...) [optional: AND pubkey = ?]
+    if (q.startsWith('DELETE FROM events WHERE id IN')) {
+      if (q.includes('AND pubkey = ?')) {
+        const pubkey = (this.boundParams[this.boundParams.length - 1] as string | undefined) ?? '';
+        const idsToDelete = this.boundParams.slice(0, -1) as string[];
+        let deletedCount = 0;
+
+        for (const id of idsToDelete) {
+          const ev = this.db.events.get(id);
+          if (ev && ev.pubkey.toLowerCase() === pubkey.toLowerCase()) {
+            this.db.events.delete(id);
+            this.db.eventTags = this.db.eventTags.filter((t) => t.event_id !== id);
+            deletedCount++;
+          }
+        }
+        return { results: [], success: true, meta: createMockMeta({ rows_written: deletedCount, changes: deletedCount }) };
+      } else {
+        const idsToDelete = this.boundParams as string[];
+        let deletedCount = 0;
+
+        for (const id of idsToDelete) {
+          if (this.db.events.delete(id)) {
+            this.db.eventTags = this.db.eventTags.filter((t) => t.event_id !== id);
+            deletedCount++;
+          }
+        }
+        return { results: [], success: true, meta: createMockMeta({ rows_written: deletedCount, changes: deletedCount }) };
+      }
     }
 
     // DELETE FROM events WHERE pubkey = ? AND kind = ? AND d_tag = ?
@@ -364,6 +386,34 @@ export class MockD1PreparedStatement implements D1PreparedStatement {
       }
     }
 
+    // 3.1 Check kind >= ? AND kind <= ?
+    if (q.includes('kind >= ? AND kind <= ?')) {
+      const minKind = this.boundParams[paramIdx++] as number;
+      const maxKind = this.boundParams[paramIdx++] as number;
+      rows = rows.filter((r) => r.kind >= minKind && r.kind <= maxKind);
+    }
+
+    // 3.2 Check kind NOT IN (...)
+    if (q.includes('kind NOT IN')) {
+      const notKindMatch = q.match(/\bkind NOT IN \(([^)]+)\)/);
+      if (notKindMatch && notKindMatch[1]) {
+        const count = notKindMatch[1].split(',').length;
+        const notKinds = this.boundParams.slice(paramIdx, paramIdx + count) as number[];
+        paramIdx += count;
+        rows = rows.filter((r) => !notKinds.includes(r.kind));
+      }
+    }
+
+    // 3.3 Check NOT (kind >= ? AND kind <= ?)
+    if (q.includes('NOT (kind >= ? AND kind <= ?)')) {
+      const notRegex = /NOT \(kind >= \? AND kind <= \?\)/g;
+      while (notRegex.exec(q) !== null) {
+        const minK = this.boundParams[paramIdx++] as number;
+        const maxK = this.boundParams[paramIdx++] as number;
+        rows = rows.filter((r) => !(r.kind >= minK && r.kind <= maxK));
+      }
+    }
+
     // 4. Check created_at >= ?
     if (q.includes('created_at >=')) {
       const since = this.boundParams[paramIdx++] as number;
@@ -374,6 +424,12 @@ export class MockD1PreparedStatement implements D1PreparedStatement {
     if (q.includes('created_at <=')) {
       const until = this.boundParams[paramIdx++] as number;
       rows = rows.filter((r) => r.created_at <= until);
+    }
+
+    // 5.1 Check created_at_recorded < ?
+    if (q.includes('created_at_recorded < ?')) {
+      const recordedCutoff = this.boundParams[paramIdx++] as number;
+      rows = rows.filter((r) => r.created_at_recorded < recordedCutoff);
     }
 
     // 6. Check tags subquery

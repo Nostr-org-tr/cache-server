@@ -5,6 +5,7 @@ import type { ClientSession } from '../durable-objects/client-session';
  */
 export interface Env {
   DB: D1Database;
+  CACHE_KV?: KVNamespace;
   CLIENT_SESSION: DurableObjectNamespace<ClientSession>;
   RELAY_NAME?: string;
   RELAY_DESCRIPTION?: string;

@@ -1,3 +1,4 @@
+import { getAuthorRelaysFromKv, putAuthorRelaysToKv } from '../cache';
 import type { NostrEvent, NostrFilter } from '../types/nostr';
 import { filterValidRelayUrls, type UrlValidationOptions } from './url-validator';
 
@@ -43,12 +44,13 @@ export function extractRelaysFromKind10002(
 }
 
 /**
- * Resolves author write relays from D1 by querying cached Kind 10002 events.
+ * Resolves author write relays from L1 KV and/or D1 by querying cached Kind 10002 events.
  */
 export async function resolveAuthorRelaysFromD1(
   db: D1Database,
   authors: string[],
-  options?: UrlValidationOptions
+  options?: UrlValidationOptions,
+  kv?: KVNamespace
 ): Promise<string[]> {
   if (!authors || authors.length === 0) {
     return [];
@@ -60,23 +62,42 @@ export async function resolveAuthorRelaysFromD1(
     return [];
   }
 
-  const CHUNK_SIZE = 50;
-  const authorChunks: string[][] = [];
-  for (let i = 0; i < validAuthors.length; i += CHUNK_SIZE) {
-    authorChunks.push(validAuthors.slice(i, i + CHUNK_SIZE));
+  const allUrls: string[] = [];
+  const authorsToQueryD1: string[] = [];
+
+  // Check L1 KV cache first if available
+  if (kv) {
+    for (const author of validAuthors) {
+      const cachedRelays = await getAuthorRelaysFromKv(kv, author);
+      if (cachedRelays && cachedRelays.length > 0) {
+        allUrls.push(...cachedRelays);
+      } else {
+        authorsToQueryD1.push(author);
+      }
+    }
+  } else {
+    authorsToQueryD1.push(...validAuthors);
   }
 
-  const allUrls: string[] = [];
+  if (authorsToQueryD1.length === 0) {
+    return filterValidRelayUrls(allUrls, options);
+  }
+
+  const CHUNK_SIZE = 50;
+  const authorChunks: string[][] = [];
+  for (let i = 0; i < authorsToQueryD1.length; i += CHUNK_SIZE) {
+    authorChunks.push(authorsToQueryD1.slice(i, i + CHUNK_SIZE));
+  }
 
   for (const chunk of authorChunks) {
     const placeholders = chunk.map(() => '?').join(',');
-    const query = `SELECT raw_event FROM events WHERE kind = 10002 AND pubkey IN (${placeholders})`;
+    const query = `SELECT pubkey, raw_event FROM events WHERE kind = 10002 AND pubkey IN (${placeholders})`;
 
     try {
       const result = await db
         .prepare(query)
         .bind(...chunk)
-        .all<{ raw_event: string }>();
+        .all<{ pubkey: string; raw_event: string }>();
 
       if (result.results && result.results.length > 0) {
         for (const row of result.results) {
@@ -84,6 +105,11 @@ export async function resolveAuthorRelaysFromD1(
             const event = JSON.parse(row.raw_event) as NostrEvent;
             const relays = extractRelaysFromKind10002(event, 'write', options);
             allUrls.push(...relays);
+
+            // Warm L1 KV with resolved relays (2-hour TTL)
+            if (kv && relays.length > 0) {
+              void putAuthorRelaysToKv(kv, row.pubkey, relays);
+            }
           } catch {
             // Skip malformed records
           }
