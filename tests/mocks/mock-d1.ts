@@ -107,6 +107,32 @@ export class MockD1PreparedStatement implements D1PreparedStatement {
       };
     }
 
+    // Query 0.25: SELECT COUNT(DISTINCT pubkey) AS total FROM events
+    if (q.includes('COUNT(DISTINCT pubkey)')) {
+      const distinctPubkeys = new Set(Array.from(this.db.events.values()).map((e) => e.pubkey));
+      return {
+        results: [{ total: distinctPubkeys.size } as unknown as T],
+        success: true,
+        meta: createMockMeta({ rows_read: this.db.events.size }),
+      };
+    }
+
+    // Query 0.26: SELECT MIN(created_at) AS oldest, MAX(created_at) AS newest FROM events
+    if (q.includes('MIN(created_at)') || q.includes('MAX(created_at)')) {
+      const allEvents = Array.from(this.db.events.values());
+      let oldest: number | null = null;
+      let newest: number | null = null;
+      if (allEvents.length > 0) {
+        oldest = Math.min(...allEvents.map((e) => e.created_at));
+        newest = Math.max(...allEvents.map((e) => e.created_at));
+      }
+      return {
+        results: [{ oldest, newest } as unknown as T],
+        success: true,
+        meta: createMockMeta({ rows_read: allEvents.length }),
+      };
+    }
+
     // Query 0.3: GROUP BY kind count
     if (q.includes('GROUP BY kind')) {
       const counts = new Map<number, number>();
