@@ -1,8 +1,18 @@
 import { describe, expect, it, beforeEach } from 'vitest';
-import { getEventByIdFromKv, getReplaceableEventFromKv, putEventToKv } from '../../src/cache';
-import { queryEventsHybrid, saveEventsBatch } from '../../src/db';
+import {
+  getEventByIdFromKv,
+  getReplaceableEventFromKv,
+  metadataWriteDedupCache,
+  putEventToKv,
+} from '../../src/cache';
+import {
+  memoryEventIdCache,
+  memoryReplaceableCache,
+  queryEventsHybrid,
+  saveEventsBatch,
+} from '../../src/db';
 import type { NostrEvent } from '../../src/types/nostr';
-import { resolveAuthorRelaysFromD1 } from '../../src/upstream/nip65';
+import { authorRelaysMemoryCache, resolveAuthorRelaysFromD1 } from '../../src/upstream/nip65';
 import { MockD1Database } from '../mocks/mock-d1';
 import { MockKVNamespace } from '../mocks/mock-kv';
 
@@ -16,9 +26,13 @@ describe('Repository Batching & Hybrid Query Optimization', () => {
   beforeEach(() => {
     mockDb = new MockD1Database();
     mockKv = new MockKVNamespace() as unknown as KVNamespace;
+    memoryEventIdCache.clear();
+    memoryReplaceableCache.clear();
+    metadataWriteDedupCache.clear();
+    authorRelaysMemoryCache.clear();
   });
 
-  it('saves batch of events to D1 and warms L1 KV cache', async () => {
+  it('saves batch of events to D1, in-memory cache, and warms KV metadata', async () => {
     const event1: NostrEvent = {
       id: 'event-id-1',
       pubkey: author1,
@@ -63,11 +77,10 @@ describe('Repository Batching & Hybrid Query Optimization', () => {
     // Verify D1 records
     expect(mockDb.events.size).toBe(2);
 
-    // Verify KV cache warming
-    const kvEvent1 = await getEventByIdFromKv(mockKv, 'event-id-1');
-    expect(kvEvent1).not.toBeNull();
-    expect(kvEvent1?.id).toBe('event-id-1');
+    // Verify in-memory L0 cache
+    expect(memoryEventIdCache.get('event-id-1')?.id).toBe('event-id-1');
 
+    // Verify KV metadata cache warming for Kind 0 profile
     const kvProfile = await getReplaceableEventFromKv(mockKv, author2, 0);
     expect(kvProfile).not.toBeNull();
     expect(kvProfile?.content).toContain('Bob');
@@ -98,7 +111,7 @@ describe('Repository Batching & Hybrid Query Optimization', () => {
     expect(results[0]?.content).toBe('Fast edge cached');
   });
 
-  it('falls back to D1 on KV miss and warms KV cache', async () => {
+  it('falls back to D1 on cache miss and warms in-memory L0 cache', async () => {
     const eventInD1: NostrEvent = {
       id: 'event-in-d1',
       pubkey: author1,
@@ -112,7 +125,8 @@ describe('Repository Batching & Hybrid Query Optimization', () => {
     // Save directly to D1 only
     await saveEventsBatch(mockDb as unknown as D1Database, [eventInD1]);
 
-    // Clear KV to ensure it starts empty
+    // Clear caches to simulate cold start
+    memoryEventIdCache.clear();
     (mockKv as unknown as MockKVNamespace).clear();
     expect(await getEventByIdFromKv(mockKv, 'event-in-d1')).toBeNull();
 
@@ -126,13 +140,8 @@ describe('Repository Batching & Hybrid Query Optimization', () => {
     expect(results).toHaveLength(1);
     expect(results[0]?.id).toBe('event-in-d1');
 
-    // Wait a tick for async KV warming
-    await new Promise((resolve) => setTimeout(resolve, 10));
-
-    // Verify KV is now warmed
-    const warmed = await getEventByIdFromKv(mockKv, 'event-in-d1');
-    expect(warmed).not.toBeNull();
-    expect(warmed?.id).toBe('event-in-d1');
+    // Verify in-memory cache is now warmed
+    expect(memoryEventIdCache.get('event-in-d1')?.id).toBe('event-in-d1');
   });
 
   it('serves Kind 0 profile lookups from KV and falls back to D1', async () => {
@@ -147,6 +156,8 @@ describe('Repository Batching & Hybrid Query Optimization', () => {
     };
 
     await saveEventsBatch(mockDb as unknown as D1Database, [profileEvent]);
+    memoryEventIdCache.clear();
+    memoryReplaceableCache.clear();
     (mockKv as unknown as MockKVNamespace).clear();
 
     const results = await queryEventsHybrid(
@@ -171,6 +182,7 @@ describe('Repository Batching & Hybrid Query Optimization', () => {
     };
 
     await saveEventsBatch(mockDb as unknown as D1Database, [relayEvent]);
+    authorRelaysMemoryCache.clear();
     (mockKv as unknown as MockKVNamespace).clear();
 
     // First resolution: reads D1 and warms KV
@@ -183,7 +195,7 @@ describe('Repository Batching & Hybrid Query Optimization', () => {
 
     expect(relaysFirst).toEqual(['wss://relay.nostr.org.tr']);
 
-    // Second resolution: should hit KV directly
+    // Second resolution: should hit in-memory / KV directly
     const relaysSecond = await resolveAuthorRelaysFromD1(
       mockDb as unknown as D1Database,
       [author1],

@@ -1,6 +1,15 @@
-import { getAuthorRelaysFromKv, putAuthorRelaysToKv } from '../cache';
+import { getAuthorRelaysFromKv, putAuthorRelaysToKv } from '../cache/kv-cache';
+import { MemoryLruCache } from '../cache/lru-cache';
 import type { NostrEvent, NostrFilter } from '../types/nostr';
 import { filterValidRelayUrls, type UrlValidationOptions } from './url-validator';
+
+/**
+ * In-memory L0 cache for resolved NIP-65 author relays (capacity 2,000, 30 min TTL).
+ */
+export const authorRelaysMemoryCache = new MemoryLruCache<string, string[]>({
+  maxSize: 2000,
+  defaultTtlMs: 30 * 60 * 1000,
+});
 
 /**
  * Extracts relay URLs from a Kind 10002 (NIP-65 Relay List Metadata) event.
@@ -44,7 +53,10 @@ export function extractRelaysFromKind10002(
 }
 
 /**
- * Resolves author write relays from L1 KV and/or D1 by querying cached Kind 10002 events.
+ * Resolves author write relays using a multi-tiered approach:
+ * 1. In-Memory L0 Cache (0 cost, 0ms)
+ * 2. KV Namespace (if bound)
+ * 3. D1 Database (Indexed query against Kind 10002)
  */
 export async function resolveAuthorRelaysFromD1(
   db: D1Database,
@@ -63,26 +75,44 @@ export async function resolveAuthorRelaysFromD1(
   }
 
   const allUrls: string[] = [];
+  const authorsToQueryNextTier: string[] = [];
+
+  // 1. Check In-Memory L0 cache
+  for (const author of validAuthors) {
+    const memRelays = authorRelaysMemoryCache.get(author);
+    if (memRelays && memRelays.length > 0) {
+      allUrls.push(...memRelays);
+    } else {
+      authorsToQueryNextTier.push(author);
+    }
+  }
+
+  if (authorsToQueryNextTier.length === 0) {
+    return filterValidRelayUrls(allUrls, options);
+  }
+
   const authorsToQueryD1: string[] = [];
 
-  // Check L1 KV cache first if available
+  // 2. Check KV cache if available
   if (kv) {
-    for (const author of validAuthors) {
+    for (const author of authorsToQueryNextTier) {
       const cachedRelays = await getAuthorRelaysFromKv(kv, author);
       if (cachedRelays && cachedRelays.length > 0) {
         allUrls.push(...cachedRelays);
+        authorRelaysMemoryCache.set(author, cachedRelays);
       } else {
         authorsToQueryD1.push(author);
       }
     }
   } else {
-    authorsToQueryD1.push(...validAuthors);
+    authorsToQueryD1.push(...authorsToQueryNextTier);
   }
 
   if (authorsToQueryD1.length === 0) {
     return filterValidRelayUrls(allUrls, options);
   }
 
+  // 3. Query D1 database in safe chunks
   const CHUNK_SIZE = 50;
   const authorChunks: string[][] = [];
   for (let i = 0; i < authorsToQueryD1.length; i += CHUNK_SIZE) {
@@ -106,7 +136,8 @@ export async function resolveAuthorRelaysFromD1(
             const relays = extractRelaysFromKind10002(event, 'write', options);
             allUrls.push(...relays);
 
-            // Warm L1 KV with resolved relays (2-hour TTL)
+            // Cache in In-Memory L0 and optionally KV
+            authorRelaysMemoryCache.set(row.pubkey, relays);
             if (kv && relays.length > 0) {
               void putAuthorRelaysToKv(kv, row.pubkey, relays);
             }

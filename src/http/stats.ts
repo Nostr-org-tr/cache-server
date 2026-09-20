@@ -335,8 +335,9 @@ export async function handleStatsRequest(env: Env): Promise<Response> {
       // Non-fatal
     }
 
-    // 6. Collect KV Cache Telemetry
-    const kvStats = await collectKvStats(env.CACHE_KV);
+    // 6. Collect KV Cache Telemetry (if enabled)
+    const kvBinding = env.ENABLE_KV_CACHE === 'false' ? undefined : env.CACHE_KV;
+    const kvStats = await collectKvStats(kvBinding);
 
     // 7. Parse configured upstreams
     const upstreamRelays = env.UPSTREAM_RELAYS

@@ -1,6 +1,7 @@
 import { classifyEventKind, extractDTag } from '../db/classifier';
 import type { NostrEvent } from '../types/nostr';
 import { extractRelaysFromKind10002 } from '../upstream/nip65';
+import { MemoryLruCache } from './lru-cache';
 
 /**
  * KV Cache configuration constants
@@ -9,6 +10,15 @@ import { extractRelaysFromKind10002 } from '../upstream/nip65';
 export const DEFAULT_KV_TTL_SECONDS = 7200;
 export const MAX_KV_TTL_SECONDS = 7200;
 export const MIN_KV_TTL_SECONDS = 60;
+
+/**
+ * In-memory deduplication cache to prevent re-writing identical metadata events to KV repeatedly.
+ * Capacity of 5,000 recent metadata keys with 30-minute TTL.
+ */
+export const metadataWriteDedupCache = new MemoryLruCache<string, number>({
+  maxSize: 5000,
+  defaultTtlMs: 30 * 60 * 1000,
+});
 
 /**
  * Sanitizes and bounds TTL seconds between MIN (60s) and MAX (7200s).
@@ -149,7 +159,7 @@ export async function getAuthorRelaysFromKv(
 }
 
 /**
- * Writes an author's resolved relays into KV with bounded TTL.
+ * Writes an author's resolved relays into KV with bounded TTL and in-memory deduplication.
  */
 export async function putAuthorRelaysToKv(
   kv: KVNamespace,
@@ -160,11 +170,20 @@ export async function putAuthorRelaysToKv(
   if (!pubkey || !relays || relays.length === 0) {
     return;
   }
+
+  // Deduplicate using in-memory signature
+  const key = getRelaysKey(pubkey);
+  const fingerprint = relays.join('|').length;
+  if (metadataWriteDedupCache.get(key) === fingerprint) {
+    return;
+  }
+
   const expirationTtl = sanitizeKvTtl(ttlSeconds);
   try {
-    await kv.put(getRelaysKey(pubkey), JSON.stringify(relays), {
+    await kv.put(key, JSON.stringify(relays), {
       expirationTtl,
     });
+    metadataWriteDedupCache.set(key, fingerprint);
   } catch {
     // Fail silently on non-critical cache write errors
   }
@@ -186,7 +205,6 @@ export async function putEventToKv(
 
   const expirationTtl = sanitizeKvTtl(ttlSeconds);
   const rawJson = JSON.stringify(event);
-
   const writes: Promise<void>[] = [];
 
   // 1. Point lookup by event ID
@@ -242,10 +260,114 @@ export async function putEventToKv(
     );
   }
 
-  try {
-    await Promise.allSettled(writes);
-  } catch {
-    // Non-critical cache write errors are ignored
+  if (writes.length > 0) {
+    try {
+      await Promise.allSettled(writes);
+    } catch {
+      // Non-critical cache write errors are ignored
+    }
+  }
+}
+
+/**
+ * Stores high-value metadata events into KV with in-memory deduplication.
+ * Only writes Kind 0 (profile), Kind 3 (contacts), Kind 10002 (relays), and replaceable events.
+ * Ephemeral events and regular feed events (Kind 1, 6, 7, etc.) are strictly excluded.
+ */
+export async function putMetadataToKv(
+  kv: KVNamespace,
+  event: NostrEvent,
+  ttlSeconds?: number
+): Promise<void> {
+  const category = classifyEventKind(event.kind);
+  if (category === 'EPHEMERAL' || category === 'REGULAR') {
+    return;
+  }
+
+  const expirationTtl = sanitizeKvTtl(ttlSeconds);
+  const rawJson = JSON.stringify(event);
+  const writes: Promise<void>[] = [];
+
+  // Kind 0 (User Metadata Profile)
+  if (event.kind === 0) {
+    const profileKey = getProfileKey(event.pubkey);
+    const lastSeenTime = metadataWriteDedupCache.get(profileKey);
+    if (lastSeenTime === undefined || event.created_at > lastSeenTime) {
+      writes.push(
+        kv.put(profileKey, rawJson, { expirationTtl }).then(() => {
+          metadataWriteDedupCache.set(profileKey, event.created_at);
+        })
+      );
+    }
+  }
+
+  // Kind 3 (Contact List)
+  if (event.kind === 3) {
+    const contactsKey = getContactsKey(event.pubkey);
+    const lastSeenTime = metadataWriteDedupCache.get(contactsKey);
+    if (lastSeenTime === undefined || event.created_at > lastSeenTime) {
+      writes.push(
+        kv.put(contactsKey, rawJson, { expirationTtl }).then(() => {
+          metadataWriteDedupCache.set(contactsKey, event.created_at);
+        })
+      );
+    }
+  }
+
+  // Kind 10002 (NIP-65 Relay List)
+  if (event.kind === 10002) {
+    const writeRelays = extractRelaysFromKind10002(event, 'write');
+    if (writeRelays.length > 0) {
+      const relaysKey = getRelaysKey(event.pubkey);
+      const lastSeenTime = metadataWriteDedupCache.get(relaysKey);
+      if (lastSeenTime === undefined || event.created_at > lastSeenTime) {
+        writes.push(
+          kv.put(relaysKey, JSON.stringify(writeRelays), { expirationTtl }).then(() => {
+            metadataWriteDedupCache.set(relaysKey, event.created_at);
+          })
+        );
+      }
+    }
+  }
+
+  // Replaceable & Parameterized Replaceable keys
+  if (category === 'REPLACEABLE') {
+    const key = getReplaceableKey(event.pubkey, event.kind);
+    const lastSeenTime = metadataWriteDedupCache.get(key);
+    if (lastSeenTime === undefined || event.created_at > lastSeenTime) {
+      writes.push(
+        (async () => {
+          const existing = await getReplaceableEventFromKv(kv, event.pubkey, event.kind);
+          if (!existing || event.created_at > existing.created_at || (event.created_at === existing.created_at && event.id < existing.id)) {
+            await kv.put(key, rawJson, { expirationTtl });
+            metadataWriteDedupCache.set(key, event.created_at);
+          }
+        })()
+      );
+    }
+  } else if (category === 'PARAMETERIZED_REPLACEABLE') {
+    const dTag = extractDTag(event.tags);
+    const key = getReplaceableKey(event.pubkey, event.kind, dTag);
+    const lastSeenTime = metadataWriteDedupCache.get(key);
+    if (lastSeenTime === undefined || event.created_at > lastSeenTime) {
+      writes.push(
+        (async () => {
+          const existing = await getReplaceableEventFromKv(kv, event.pubkey, event.kind, dTag);
+          if (!existing || event.created_at > existing.created_at || (event.created_at === existing.created_at && event.id < existing.id)) {
+            await kv.put(key, rawJson, { expirationTtl });
+            metadataWriteDedupCache.set(key, event.created_at);
+          }
+        })()
+      );
+    }
+  }
+
+  if (writes.length > 0) {
+    try {
+      await Promise.allSettled(writes);
+    } catch {
+      // Non-critical cache write errors are ignored
+    }
   }
 }
 
@@ -263,15 +385,23 @@ export async function deleteEventFromKv(
 
   if (pubkey && typeof kind === 'number') {
     if (kind === 0) {
-      deletes.push(kv.delete(getProfileKey(pubkey)));
+      const profileKey = getProfileKey(pubkey);
+      metadataWriteDedupCache.delete(profileKey);
+      deletes.push(kv.delete(profileKey));
     }
     if (kind === 3) {
-      deletes.push(kv.delete(getContactsKey(pubkey)));
+      const contactsKey = getContactsKey(pubkey);
+      metadataWriteDedupCache.delete(contactsKey);
+      deletes.push(kv.delete(contactsKey));
     }
     if (kind === 10002) {
-      deletes.push(kv.delete(getRelaysKey(pubkey)));
+      const relaysKey = getRelaysKey(pubkey);
+      metadataWriteDedupCache.delete(relaysKey);
+      deletes.push(kv.delete(relaysKey));
     }
-    deletes.push(kv.delete(getReplaceableKey(pubkey, kind, dTag)));
+    const replKey = getReplaceableKey(pubkey, kind, dTag);
+    metadataWriteDedupCache.delete(replKey);
+    deletes.push(kv.delete(replKey));
   }
 
   try {

@@ -2,7 +2,9 @@ import {
   deleteEventFromKv,
   getEventsByIdsFromKv,
   getReplaceableEventFromKv,
-  putEventToKv,
+  getReplaceableKey,
+  MemoryLruCache,
+  putMetadataToKv,
 } from '../cache';
 import type { NostrEvent, NostrFilter } from '../types/nostr';
 import {
@@ -17,6 +19,67 @@ import type { EventFilterQueryOptions, EventRow, SaveResult } from './types';
 
 export const MAX_SQL_PARAM_ARRAY_SIZE = 50;
 export const MAX_D1_BATCH_STATEMENTS = 50;
+
+/**
+ * In-memory L0 cache for fast point lookups by event ID (capacity 5,000, 10 min TTL).
+ */
+export const memoryEventIdCache = new MemoryLruCache<string, NostrEvent>({
+  maxSize: 5000,
+  defaultTtlMs: 10 * 60 * 1000,
+});
+
+/**
+ * In-memory L0 cache for replaceable and metadata events (capacity 2,000, 30 min TTL).
+ */
+export const memoryReplaceableCache = new MemoryLruCache<string, NostrEvent>({
+  maxSize: 2000,
+  defaultTtlMs: 30 * 60 * 1000,
+});
+
+/**
+ * Helper to cache an event in the in-memory L0 caches.
+ */
+export function cacheEventInMemory(event: NostrEvent): void {
+  const category = classifyEventKind(event.kind);
+  if (category === 'EPHEMERAL') {
+    return;
+  }
+
+  // Cache point lookup
+  memoryEventIdCache.set(event.id, event);
+
+  // Cache replaceable / metadata keys
+  if (category === 'REPLACEABLE' || event.kind === 0 || event.kind === 3 || event.kind === 10002) {
+    const key = getReplaceableKey(event.pubkey, event.kind);
+    const existing = memoryReplaceableCache.get(key);
+    if (!existing || event.created_at > existing.created_at || (event.created_at === existing.created_at && event.id < existing.id)) {
+      memoryReplaceableCache.set(key, event);
+    }
+  } else if (category === 'PARAMETERIZED_REPLACEABLE') {
+    const dTag = extractDTag(event.tags);
+    const key = getReplaceableKey(event.pubkey, event.kind, dTag);
+    const existing = memoryReplaceableCache.get(key);
+    if (!existing || event.created_at > existing.created_at || (event.created_at === existing.created_at && event.id < existing.id)) {
+      memoryReplaceableCache.set(key, event);
+    }
+  }
+}
+
+/**
+ * Invalidate an event from the in-memory L0 caches.
+ */
+export function invalidateEventInMemory(
+  id: string,
+  pubkey?: string,
+  kind?: number,
+  dTag?: string
+): void {
+  memoryEventIdCache.delete(id);
+  if (pubkey && typeof kind === 'number') {
+    const key = getReplaceableKey(pubkey, kind, dTag);
+    memoryReplaceableCache.delete(key);
+  }
+}
 
 /**
  * Safely executes D1 batch statements in chunks of at most MAX_D1_BATCH_STATEMENTS
@@ -153,6 +216,15 @@ export async function saveEvent(db: D1Database, event: NostrEvent): Promise<Save
       await executeBatchSafe(db, statements);
     }
 
+    // Invalidate in memory
+    if (Array.isArray(event.tags)) {
+      for (const tag of event.tags) {
+        if (Array.isArray(tag) && tag[0] === 'e' && typeof tag[1] === 'string') {
+          invalidateEventInMemory(tag[1]);
+        }
+      }
+    }
+
     return { action: 'deleted', id: event.id };
   }
 
@@ -205,6 +277,7 @@ export async function saveEvent(db: D1Database, event: NostrEvent): Promise<Save
       }
 
       await executeBatchSafe(db, statements);
+      cacheEventInMemory(event);
       return { action: 'inserted', id: event.id };
     }
 
@@ -238,6 +311,7 @@ export async function saveEvent(db: D1Database, event: NostrEvent): Promise<Save
     }
 
     await executeBatchSafe(db, statements);
+    cacheEventInMemory(event);
     return { action: 'inserted', id: event.id };
   }
 
@@ -293,6 +367,7 @@ export async function saveEvent(db: D1Database, event: NostrEvent): Promise<Save
       }
 
       await executeBatchSafe(db, statements);
+      cacheEventInMemory(event);
       return { action: 'inserted', id: event.id };
     }
 
@@ -326,6 +401,7 @@ export async function saveEvent(db: D1Database, event: NostrEvent): Promise<Save
     }
 
     await executeBatchSafe(db, statements);
+    cacheEventInMemory(event);
     return { action: 'inserted', id: event.id };
   }
 
@@ -368,6 +444,7 @@ export async function saveEvent(db: D1Database, event: NostrEvent): Promise<Save
   }
 
   await executeBatchSafe(db, statements);
+  cacheEventInMemory(event);
   return { action: 'inserted', id: event.id };
 }
 
@@ -384,8 +461,9 @@ export function hasTagFilters(filter: NostrFilter): boolean {
 }
 
 /**
- * Saves a batch of Nostr events efficiently into Cloudflare D1 and warms L1 KV cache.
- * Uses atomic statements batching to minimize D1 round-trips.
+ * Saves a batch of Nostr events efficiently into Cloudflare D1.
+ * Caches events in the zero-cost in-memory L0 cache tier and selectively warms
+ * high-value metadata into KV (Kind 0, 3, 10002) while eliminating bulk event write storms.
  */
 export async function saveEventsBatch(
   db: D1Database,
@@ -398,7 +476,7 @@ export async function saveEventsBatch(
 
   const results: SaveResult[] = [];
   const statements: D1PreparedStatement[] = [];
-  const eventsToWarmInKv: NostrEvent[] = [];
+  const metadataToWarmInKv: NostrEvent[] = [];
 
   for (const event of events) {
     const category = classifyEventKind(event.kind);
@@ -445,13 +523,15 @@ export async function saveEventsBatch(
       }
 
       results.push({ action: 'deleted', id: event.id });
-      eventsToWarmInKv.push(event);
 
-      // Invalidate target event IDs in KV if kv is bound
-      if (kv && Array.isArray(event.tags)) {
+      // Invalidate from in-memory cache & KV if target event IDs are referenced
+      if (Array.isArray(event.tags)) {
         for (const tag of event.tags) {
           if (Array.isArray(tag) && tag[0] === 'e' && typeof tag[1] === 'string') {
-            void deleteEventFromKv(kv, tag[1]);
+            invalidateEventInMemory(tag[1]);
+            if (kv) {
+              void deleteEventFromKv(kv, tag[1]);
+            }
           }
         }
       }
@@ -509,7 +589,8 @@ export async function saveEventsBatch(
       }
 
       results.push({ action: 'inserted', id: event.id });
-      eventsToWarmInKv.push(event);
+      cacheEventInMemory(event);
+      metadataToWarmInKv.push(event);
       continue;
     }
 
@@ -567,7 +648,8 @@ export async function saveEventsBatch(
       }
 
       results.push({ action: 'inserted', id: event.id });
-      eventsToWarmInKv.push(event);
+      cacheEventInMemory(event);
+      metadataToWarmInKv.push(event);
       continue;
     }
 
@@ -601,7 +683,7 @@ export async function saveEventsBatch(
     }
 
     results.push({ action: 'inserted', id: event.id });
-    eventsToWarmInKv.push(event);
+    cacheEventInMemory(event);
   }
 
   // Execute all aggregated D1 statements in safe batches
@@ -609,9 +691,9 @@ export async function saveEventsBatch(
     await executeBatchSafe(db, statements);
   }
 
-  // Warm L1 KV cache concurrently (capped at 2 hours max TTL)
-  if (kv && eventsToWarmInKv.length > 0) {
-    void Promise.allSettled(eventsToWarmInKv.map((e) => putEventToKv(kv, e)));
+  // Selectively warm only high-value metadata in KV (never regular feed events)
+  if (kv && metadataToWarmInKv.length > 0) {
+    await Promise.allSettled(metadataToWarmInKv.map((e) => putMetadataToKv(kv, e)));
   }
 
   return results;
@@ -649,7 +731,9 @@ export async function queryEvents(
     if (result.results && Array.isArray(result.results)) {
       for (const row of result.results) {
         if (!eventMap.has(row.id)) {
-          eventMap.set(row.id, rowToNostrEvent(row));
+          const event = rowToNostrEvent(row);
+          eventMap.set(row.id, event);
+          cacheEventInMemory(event);
         }
       }
     }
@@ -667,9 +751,12 @@ export async function queryEvents(
 }
 
 /**
- * Hybrid query resolver:
- * Routes point lookups (ids, single author profiles, relay lists) to L1 KV first.
- * Falls back to D1 for cache misses or complex queries, warming KV upon D1 response.
+ * Multi-tier query resolver:
+ * 1. Layer 0: High-speed In-Memory LRU Cache ($0 cost, 0ms latency).
+ * 2. Layer 1: KV Namespace for point ID / metadata lookups if bound.
+ * 3. Layer 2: Cloudflare D1 indexed SQLite for complex multi-filter and missed queries.
+ *
+ * Eliminates all write-back storms against KV.
  */
 export async function queryEventsHybrid(
   db: D1Database,
@@ -679,11 +766,6 @@ export async function queryEventsHybrid(
 ): Promise<NostrEvent[]> {
   if (filters.length === 0) {
     return [];
-  }
-
-  // If KV is not bound, query D1 directly
-  if (!kv) {
-    return queryEvents(db, filters, options);
   }
 
   const eventMap = new Map<string, NostrEvent>();
@@ -706,12 +788,34 @@ export async function queryEventsHybrid(
       !hasTags;
 
     if (isPureIdLookup && filter.ids) {
-      const { hits, misses } = await getEventsByIdsFromKv(kv, filter.ids);
-      for (const hit of hits) {
-        eventMap.set(hit.id, hit);
+      const memoryMisses: string[] = [];
+
+      // 1. Check In-Memory L0 cache
+      for (const id of filter.ids) {
+        const memHit = memoryEventIdCache.get(id);
+        if (memHit) {
+          eventMap.set(memHit.id, memHit);
+        } else {
+          memoryMisses.push(id);
+        }
       }
-      if (misses.length > 0) {
-        d1FallbackFilters.push({ ...filter, ids: misses });
+
+      if (memoryMisses.length === 0) {
+        continue;
+      }
+
+      // 2. Check KV if available
+      if (kv) {
+        const { hits, misses } = await getEventsByIdsFromKv(kv, memoryMisses);
+        for (const hit of hits) {
+          eventMap.set(hit.id, hit);
+          cacheEventInMemory(hit);
+        }
+        if (misses.length > 0) {
+          d1FallbackFilters.push({ ...filter, ids: misses });
+        }
+      } else {
+        d1FallbackFilters.push({ ...filter, ids: memoryMisses });
       }
       continue;
     }
@@ -736,12 +840,23 @@ export async function queryEventsHybrid(
       const missingAuthors: string[] = [];
 
       for (const author of filter.authors) {
-        const cached = await getReplaceableEventFromKv(kv, author, kind);
-        if (cached) {
-          eventMap.set(cached.id, cached);
-        } else {
-          missingAuthors.push(author);
+        const replKey = getReplaceableKey(author, kind);
+        const memHit = memoryReplaceableCache.get(replKey);
+        if (memHit) {
+          eventMap.set(memHit.id, memHit);
+          continue;
         }
+
+        if (kv) {
+          const cached = await getReplaceableEventFromKv(kv, author, kind);
+          if (cached) {
+            eventMap.set(cached.id, cached);
+            cacheEventInMemory(cached);
+            continue;
+          }
+        }
+
+        missingAuthors.push(author);
       }
 
       if (missingAuthors.length > 0) {
@@ -750,7 +865,7 @@ export async function queryEventsHybrid(
       continue;
     }
 
-    // Complex query: delegate to D1
+    // Complex query: delegate directly to D1 indexed engine
     d1FallbackFilters.push(filter);
   }
 
@@ -759,9 +874,18 @@ export async function queryEventsHybrid(
     const d1Events = await queryEvents(db, d1FallbackFilters, options);
     for (const evt of d1Events) {
       eventMap.set(evt.id, evt);
+      cacheEventInMemory(evt);
     }
-    // Warm KV in background with retrieved D1 events
-    void Promise.allSettled(d1Events.map((e) => putEventToKv(kv, e)));
+
+    // Selectively warm only high-value metadata in KV (never feed events)
+    if (kv) {
+      const metadataOnly = d1Events.filter(
+        (e) => e.kind === 0 || e.kind === 3 || e.kind === 10002
+      );
+      if (metadataOnly.length > 0) {
+        void Promise.allSettled(metadataOnly.map((e) => putMetadataToKv(kv, e)));
+      }
+    }
   }
 
   const sortedEvents = Array.from(eventMap.values()).sort(

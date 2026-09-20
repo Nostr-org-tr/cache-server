@@ -18,5 +18,5 @@ export interface Env {
   RATE_LIMIT_PUBKEY_WRITES_PER_MIN?: string;
   ALLOW_DIRECT_WRITES?: string;
   READ_ONLY?: string;
+  ENABLE_KV_CACHE?: string;
 }
-

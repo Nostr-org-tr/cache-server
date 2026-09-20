@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import {
+  authorRelaysMemoryCache,
   extractRelayHintsFromFilters,
   extractRelaysFromKind10002,
   resolveAuthorRelaysFromD1,
@@ -9,6 +10,10 @@ import { MockD1Database } from '../mocks/mock-d1';
 
 describe('NIP-65 & Tag Relay Resolver', () => {
   const dummyPubkey = 'a'.repeat(64);
+
+  beforeEach(() => {
+    authorRelaysMemoryCache.clear();
+  });
 
   describe('extractRelaysFromKind10002', () => {
     it('extracts write relays correctly from kind 10002 event', () => {
