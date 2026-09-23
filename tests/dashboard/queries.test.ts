@@ -7,7 +7,6 @@ import {
   queryHourOfDay,
   queryKindDistribution,
   queryMostFollowed,
-  queryMostFollowing,
   querySummary,
   queryTopPosters,
   queryTopSharers,
@@ -237,19 +236,27 @@ describe('queryTopTags', () => {
     expect(result).toEqual([]);
   });
 
-  it('counts and sorts tag names correctly', async () => {
+  it('counts and sorts hashtags (tag_name = "t") and excludes builtin tags', async () => {
     const db = makeDb();
     addEvent(db, { id: 'e1', pubkey: 'p1', kind: 1 });
     addEvent(db, { id: 'e2', pubkey: 'p1', kind: 1 });
-    db.eventTags.push({ event_id: 'e1', tag_name: 'p', tag_value: 'v1' });
-    db.eventTags.push({ event_id: 'e2', tag_name: 'p', tag_value: 'v2' });
-    db.eventTags.push({ event_id: 'e1', tag_name: 'e', tag_value: 'v3' });
+    // Non-t tags (structural tags like 'p', 'e', 'd') should be ignored
+    db.eventTags.push({ event_id: 'e1', tag_name: 'p', tag_value: 'pubkey1' });
+    db.eventTags.push({ event_id: 'e2', tag_name: 'd', tag_value: 'd-id' });
+    db.eventTags.push({ event_id: 'e1', tag_name: 'e', tag_value: 'event1' });
+    // Builtin tags as values should also be ignored
+    db.eventTags.push({ event_id: 'e1', tag_name: 't', tag_value: 'd' });
+    // Real hashtags
+    db.eventTags.push({ event_id: 'e1', tag_name: 't', tag_value: 'Bitcoin' });
+    db.eventTags.push({ event_id: 'e2', tag_name: 't', tag_value: 'bitcoin' });
+    db.eventTags.push({ event_id: 'e1', tag_name: 't', tag_value: 'nostr' });
 
     const result = await queryTopTags(db as unknown as D1Database);
-    expect(result[0]?.tag_name).toBe('p');
+    expect(result[0]?.tag_name).toBe('bitcoin');
     expect(result[0]?.count).toBe(2);
-    expect(result[1]?.tag_name).toBe('e');
+    expect(result[1]?.tag_name).toBe('nostr');
     expect(result[1]?.count).toBe(1);
+    expect(result.some((r) => r.tag_name === 'p' || r.tag_name === 'd' || r.tag_name === 'e')).toBe(false);
   });
 });
 
@@ -265,18 +272,40 @@ describe('queryTopPosters', () => {
     expect(result).toEqual([]);
   });
 
-  it('counts kind 1 posts in last 24h per pubkey', async () => {
+  it('counts kind 1 posts in last 24h per pubkey and attaches profile metadata', async () => {
     const db = makeDb();
     addEvent(db, { id: 'e1', pubkey: 'p1', kind: 1, created_at: NOW - H1 });
     addEvent(db, { id: 'e2', pubkey: 'p1', kind: 1, created_at: NOW - 2 * H1 });
     addEvent(db, { id: 'e3', pubkey: 'p2', kind: 1, created_at: NOW - H1 });
     addEvent(db, { id: 'e4', pubkey: 'p1', kind: 6, created_at: NOW - H1 }); // not kind 1
+    addEvent(db, {
+      id: 'p1_prof',
+      pubkey: 'p1',
+      kind: 0,
+      raw_event: JSON.stringify({
+        content: JSON.stringify({ display_name: 'Alice', picture: 'https://example.com/alice.png' }),
+      }),
+    });
 
     const result = await queryTopPosters(db as unknown as D1Database, NOW);
     expect(result[0]?.pubkey).toBe('p1');
     expect(result[0]?.count).toBe(2);
+    expect(result[0]?.display_name).toBe('Alice');
+    expect(result[0]?.avatar_url).toBe('https://example.com/alice.png');
     expect(result[1]?.pubkey).toBe('p2');
     expect(result[1]?.count).toBe(1);
+    expect(result[1]?.avatar_url).toBeNull();
+  });
+
+  it('formats display_name as npub when 64-hex author has no Kind 0 profile', async () => {
+    const db = makeDb();
+    const hexPubkey = '82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a04f0d618e479a596';
+    addEvent(db, { id: 'e1', pubkey: hexPubkey, kind: 1, created_at: NOW - H1 });
+
+    const result = await queryTopPosters(db as unknown as D1Database, NOW);
+    expect(result[0]?.pubkey).toBe(hexPubkey);
+    expect(result[0]?.display_name.startsWith('npub1')).toBe(true);
+    expect(result[0]?.display_name).toContain('…');
   });
 });
 
@@ -316,28 +345,6 @@ describe('queryMostFollowed', () => {
     expect(result[0]?.pubkey).toBe('p3');
     expect(result[0]?.count).toBe(2);
     expect(result[1]?.pubkey).toBe('p4');
-    expect(result[1]?.count).toBe(1);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// queryMostFollowing
-// ---------------------------------------------------------------------------
-
-describe('queryMostFollowing', () => {
-  it('counts p-tags in each pubkey kind 3 event', async () => {
-    const db = makeDb();
-    addEvent(db, { id: 'e1', pubkey: 'p1', kind: 3 });
-    addEvent(db, { id: 'e2', pubkey: 'p2', kind: 3 });
-    db.eventTags.push({ event_id: 'e1', tag_name: 'p', tag_value: 'px' });
-    db.eventTags.push({ event_id: 'e1', tag_name: 'p', tag_value: 'py' });
-    db.eventTags.push({ event_id: 'e1', tag_name: 'p', tag_value: 'pz' });
-    db.eventTags.push({ event_id: 'e2', tag_name: 'p', tag_value: 'px' });
-
-    const result = await queryMostFollowing(db as unknown as D1Database);
-    expect(result[0]?.pubkey).toBe('p1');
-    expect(result[0]?.count).toBe(3);
-    expect(result[1]?.pubkey).toBe('p2');
     expect(result[1]?.count).toBe(1);
   });
 });

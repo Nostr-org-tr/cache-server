@@ -253,10 +253,13 @@ export class MockD1PreparedStatement implements D1PreparedStatement {
     }
 
     // Dashboard B6: Top tags
-    if (q.includes('FROM event_tags') && q.includes('GROUP BY tag_name')) {
+    if (q.includes('FROM event_tags') && (q.includes('tag_name = \'t\'') || q.includes('GROUP BY tag_name') || q.includes('GROUP BY LOWER(tag_value)'))) {
       const tagCounts = new Map<string, number>();
       for (const t of this.db.eventTags) {
-        tagCounts.set(t.tag_name, (tagCounts.get(t.tag_name) || 0) + 1);
+        if (t.tag_name === 't' && t.tag_value && !['d', 't', 'p', 'e', 'a', 'k', 'q', 'g', 'r'].includes(t.tag_value.toLowerCase())) {
+          const val = t.tag_value.toLowerCase();
+          tagCounts.set(val, (tagCounts.get(val) || 0) + 1);
+        }
       }
       let sorted = Array.from(tagCounts.entries())
         .map(([tag_name, count]) => ({ tag_name, count }))
@@ -274,32 +277,6 @@ export class MockD1PreparedStatement implements D1PreparedStatement {
 
     // Dashboard C1 / C2: Leaderboard Posters / Sharers
     if (q.includes('GROUP BY e.pubkey') && q.includes('FROM events e')) {
-      if (q.includes('e.kind = 3')) {
-        // C4: Most Following
-        const counts = new Map<string, number>();
-        for (const [eventId, ev] of this.db.events.entries()) {
-          if (ev.kind === 3) {
-            const pTags = this.db.eventTags.filter((t) => t.event_id === eventId && t.tag_name === 'p');
-            counts.set(ev.pubkey, pTags.length);
-          }
-        }
-        let sorted = Array.from(counts.entries())
-          .map(([pubkey, count]) => {
-            const profile = Array.from(this.db.events.values()).find((e) => e.pubkey === pubkey && e.kind === 0);
-            return {
-              pubkey,
-              count,
-              display_name: profile ? 'Profile Name' : `${pubkey.slice(0, 16)}...`,
-            };
-          })
-          .sort((a, b) => b.count - a.count);
-        return {
-          results: sorted.slice(0, 10) as unknown as T[],
-          success: true,
-          meta: createMockMeta({ rows_read: sorted.length }),
-        };
-      }
-
       const since = this.boundParams[0] as number;
       const isKind1 = q.includes('e.kind = 1');
       const isSharer = q.includes('e.kind IN (6, 16)');
@@ -318,10 +295,23 @@ export class MockD1PreparedStatement implements D1PreparedStatement {
       let sorted = Array.from(counts.entries())
         .map(([pubkey, count]) => {
           const profile = Array.from(this.db.events.values()).find((e) => e.pubkey === pubkey && e.kind === 0);
+          let display_name: string | null = null;
+          let avatar_url: string | null = null;
+          if (profile) {
+            try {
+              const raw = JSON.parse(profile.raw_event);
+              const content = typeof raw.content === 'string' ? JSON.parse(raw.content) : raw.content;
+              display_name = content.display_name || content.name || null;
+              avatar_url = content.picture || null;
+            } catch {
+              display_name = 'Profile Name';
+            }
+          }
           return {
             pubkey,
             count,
-            display_name: profile ? 'Profile Name' : `${pubkey.slice(0, 16)}...`,
+            display_name,
+            avatar_url,
           };
         })
         .sort((a, b) => b.count - a.count);
@@ -350,10 +340,23 @@ export class MockD1PreparedStatement implements D1PreparedStatement {
       let sorted = Array.from(followersMap.entries())
         .map(([pubkey, followerSet]) => {
           const profile = Array.from(this.db.events.values()).find((e) => e.pubkey === pubkey && e.kind === 0);
+          let display_name: string | null = null;
+          let avatar_url: string | null = null;
+          if (profile) {
+            try {
+              const raw = JSON.parse(profile.raw_event);
+              const content = typeof raw.content === 'string' ? JSON.parse(raw.content) : raw.content;
+              display_name = content.display_name || content.name || null;
+              avatar_url = content.picture || null;
+            } catch {
+              display_name = 'Profile Name';
+            }
+          }
           return {
             pubkey,
             count: followerSet.size,
-            display_name: profile ? 'Profile Name' : `${pubkey.slice(0, 16)}...`,
+            display_name,
+            avatar_url,
           };
         })
         .sort((a, b) => b.count - a.count);
@@ -410,8 +413,20 @@ export class MockD1PreparedStatement implements D1PreparedStatement {
     if (q.includes('WHERE e.pubkey = ? AND e.kind = 0') || (q.includes('display_name') && q.includes('e.kind = 0'))) {
       const pubkey = this.boundParams[0] as string;
       const profile = Array.from(this.db.events.values()).find((e) => e.pubkey === pubkey && e.kind === 0);
+      let display_name: string | null = null;
+      let avatar_url: string | null = null;
+      if (profile) {
+        try {
+          const raw = JSON.parse(profile.raw_event);
+          const content = typeof raw.content === 'string' ? JSON.parse(raw.content) : raw.content;
+          display_name = content.display_name || content.name || null;
+          avatar_url = content.picture || null;
+        } catch {
+          display_name = 'Profile Name';
+        }
+      }
       return {
-        results: [{ display_name: profile ? 'Profile Name' : `${pubkey.slice(0, 16)}...` } as unknown as T],
+        results: [{ display_name, avatar_url } as unknown as T],
         success: true,
         meta: createMockMeta({ rows_read: 1 }),
       };

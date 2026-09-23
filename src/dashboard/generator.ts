@@ -7,7 +7,6 @@
 
 import type { Env } from '../types/env';
 import { APP_VERSION } from '../version';
-import { DEFAULT_GC_TIERS } from '../db/gc';
 import { DEFAULT_UPSTREAM_RELAYS } from '../upstream/pool-manager';
 import {
   queryAgeBuckets,
@@ -17,7 +16,6 @@ import {
   queryHourOfDay,
   queryKindDistribution,
   queryMostFollowed,
-  queryMostFollowing,
   querySummary,
   queryTopPosters,
   queryTopSharers,
@@ -63,7 +61,6 @@ export async function generateDashboard(env: Env): Promise<string | null> {
       topPosters,
       topSharers,
       mostFollowed,
-      mostFollowing,
     ] = await Promise.all([
       querySummary(env.DB),
       queryHourlyTimeline(env.DB, nowSeconds),
@@ -75,7 +72,6 @@ export async function generateDashboard(env: Env): Promise<string | null> {
       queryTopPosters(env.DB, nowSeconds),
       queryTopSharers(env.DB, nowSeconds),
       queryMostFollowed(env.DB),
-      queryMostFollowing(env.DB),
     ]);
 
     // Hot 5 uses the hourlyTimeline result to build sparklines — runs after
@@ -87,11 +83,6 @@ export async function generateDashboard(env: Env): Promise<string | null> {
       : [...DEFAULT_UPSTREAM_RELAYS];
 
     const gcSchedule = 'Daily at 03:00 UTC (0 3 * * *)';
-
-    // Derive GC schedule description from DEFAULT_GC_TIERS
-    const gcSummary = DEFAULT_GC_TIERS.map(
-      (t) => `${t.name}: ${Math.round(t.ttlSeconds / 86400)}d`
-    ).join(' · ');
 
     const data: DashboardData = {
       generatedAt: nowSeconds,
@@ -105,7 +96,6 @@ export async function generateDashboard(env: Env): Promise<string | null> {
       topPosters,
       topSharers,
       mostFollowed,
-      mostFollowing,
       hot5,
       relay: {
         name: env.RELAY_NAME ?? 'Nostr Cache',
@@ -113,7 +103,7 @@ export async function generateDashboard(env: Env): Promise<string | null> {
         pubkey: env.RELAY_PUBKEY ?? '',
         contact: env.RELAY_CONTACT ?? '',
         upstream_relays: upstreamRelays,
-        gc_schedule: `${gcSchedule} | ${gcSummary}`,
+        gc_schedule: gcSchedule,
       },
     };
 

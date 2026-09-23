@@ -46,12 +46,14 @@ export interface AgeBuckets {
 export interface AccountLeaderEntry {
   readonly pubkey: string;
   readonly display_name: string;
+  readonly avatar_url: string | null;
   readonly count: number;
 }
 
 export interface TrendingAccount {
   readonly pubkey: string;
   readonly display_name: string;
+  readonly avatar_url: string | null;
   readonly posts_24h: number;
   readonly mentions_24h: number;
   readonly trend_score: number;
@@ -96,11 +98,10 @@ export interface DashboardData {
   readonly dailyVolume: readonly DayBucket[];            // B3: last 7 days, daily
   readonly kindDist: readonly KindEntry[];               // B4: top 15 kinds
   readonly ageBuckets: AgeBuckets;                       // B5: freshness doughnut
-  readonly topTags: readonly TagEntry[];                 // B6: top 20 tags
+  readonly topTags: readonly TagEntry[];                 // B6: top 20 hashtags
   readonly topPosters: readonly AccountLeaderEntry[];    // C1: most posts today
   readonly topSharers: readonly AccountLeaderEntry[];    // C2: most reposts 7d
   readonly mostFollowed: readonly AccountLeaderEntry[];  // C3: most followed
-  readonly mostFollowing: readonly AccountLeaderEntry[]; // C4: most following
   readonly hot5: readonly TrendingAccount[];             // D: trending accounts
   readonly relay: RelayInfo;
 }

@@ -6,16 +6,9 @@
  * All DB-sourced string values are JSON-encoded before embedding (XSS-safe).
  */
 
-import type { DashboardData, HourlyBucket } from './types';
-
-// ---------------------------------------------------------------------------
-// Chart.js v4.5.1 — jsDelivr UMD build with pinned SRI hash
-// ---------------------------------------------------------------------------
-// SRI hash computed from: https://www.jsdelivr.com/package/npm/chart.js?path=dist
-const CHARTJS_CDN =
-  'https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js';
-const CHARTJS_SRI =
-  'sha256-B9lAC9sS7gWHFLhpFLzLTFkBTi4CiSBVVGdK6BGAkc=';
+import type { AccountLeaderEntry, DashboardData, HourlyBucket } from './types';
+import { CHARTJS_SOURCE } from './generated-chartjs';
+import { encodeNpub, shortenNpub } from '../protocol/nip19';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -55,11 +48,6 @@ function fmtDayLabel(ts: number): string {
     day: 'numeric',
     timeZone: 'UTC',
   });
-}
-
-/** Truncate a pubkey for display. */
-function shortPubkey(pubkey: string): string {
-  return `${pubkey.slice(0, 8)}…${pubkey.slice(-8)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -113,13 +101,6 @@ function topTagsData(rows: readonly { tag_name: string; count: number }[]): stri
   const labels = rows.map((r) => `#${r.tag_name}`);
   const data = rows.map((r) => r.count);
   return island({ labels, data });
-}
-
-function leaderboardData(rows: readonly { pubkey: string; display_name: string; count: number }[]): string {
-  const labels = rows.map((r) => r.display_name);
-  const data = rows.map((r) => r.count);
-  const pubkeys = rows.map((r) => r.pubkey);
-  return island({ labels, data, pubkeys });
 }
 
 // ---------------------------------------------------------------------------
@@ -248,12 +229,103 @@ const CSS = `
   /* Leaderboards */
   .leaderboard-grid {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(3, 1fr);
     gap: 1.5rem;
     margin-bottom: 1.5rem;
   }
-  @media (max-width: 900px) {
+  @media (max-width: 1024px) {
     .leaderboard-grid { grid-template-columns: 1fr; }
+  }
+  .user-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .user-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    text-decoration: none;
+    color: inherit;
+    transition: border-color 0.15s ease, transform 0.15s ease;
+  }
+  .user-row:hover {
+    border-color: var(--accent);
+    transform: translateY(-1px);
+  }
+  .user-rank {
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--accent);
+    min-width: 1.5rem;
+  }
+  .user-avatar-wrap {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    overflow: hidden;
+    flex-shrink: 0;
+    background: var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .user-avatar {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+  .user-avatar-fallback {
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    color: #fff;
+    font-size: 0.8rem;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    user-select: none;
+  }
+  .user-info {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    flex: 1;
+  }
+  .user-name {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .user-pubkey {
+    font-size: 0.65rem;
+    color: var(--muted);
+    font-family: monospace;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .user-score {
+    font-size: 0.85rem;
+    font-weight: 700;
+    color: var(--accent2);
+    white-space: nowrap;
+    text-align: right;
+  }
+  .user-unit {
+    font-size: 0.65rem;
+    font-weight: normal;
+    color: var(--muted);
+    display: block;
   }
   /* Hot 5 */
   .hot5-grid {
@@ -269,7 +341,12 @@ const CSS = `
     padding: 1rem;
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: 0.6rem;
+  }
+  .trend-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
   }
   .trend-rank {
     font-size: 0.7rem;
@@ -278,13 +355,31 @@ const CSS = `
     text-transform: uppercase;
     letter-spacing: 0.1em;
   }
-  .trend-name { font-size: 0.95rem; font-weight: 600; }
+  .trend-profile-link {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    text-decoration: none;
+    color: inherit;
+    min-width: 0;
+  }
+  .trend-profile-link:hover .trend-name {
+    color: var(--accent2);
+  }
+  .trend-name {
+    font-size: 0.95rem;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition: color 0.15s ease;
+  }
   .trend-pubkey { font-size: 0.65rem; color: var(--muted); font-family: monospace; }
   .trend-stats { display: flex; gap: 1rem; font-size: 0.75rem; color: var(--muted); }
   .trend-stats strong { color: var(--text); }
-  .trend-label-surging { color: var(--green); font-weight: 700; }
-  .trend-label-rising { color: var(--accent2); font-weight: 600; }
-  .trend-label-stable { color: var(--muted); }
+  .trend-label-surging { font-size: 0.7rem; color: var(--green); font-weight: 700; }
+  .trend-label-rising { font-size: 0.7rem; color: var(--accent2); font-weight: 600; }
+  .trend-label-stable { font-size: 0.7rem; color: var(--muted); }
   .sparkline-wrap { height: 50px; }
   /* Footer */
   footer {
@@ -415,10 +510,6 @@ function chartScript(): string {
   initBar('b4', true);
   initDoughnut('b5');
   initBar('b6', true);
-  initBar('c1', true);
-  initBar('c2', true);
-  initBar('c3', true);
-  initBar('c4', true);
 
   // Hot 5 sparklines
   for (var i = 0; i < 5; i++) {
@@ -426,6 +517,53 @@ function chartScript(): string {
   }
 })();
   `.trim();
+}
+
+// ---------------------------------------------------------------------------
+// Leaderboard list HTML
+// ---------------------------------------------------------------------------
+
+function renderLeaderboardList(
+  entries: readonly AccountLeaderEntry[],
+  unitLabel: string
+): string {
+  if (entries.length === 0) {
+    return `<p style="color:var(--muted);font-size:0.85rem;padding:0.5rem 0;">No activity recorded yet.</p>`;
+  }
+
+  return `
+<div class="user-list">
+  ${entries
+    .map((acc, i) => {
+      let npub = acc.pubkey;
+      try {
+        npub = encodeNpub(acc.pubkey);
+      } catch {
+        // Non-fatal fallback
+      }
+      const shortLabel = shortenNpub(acc.pubkey);
+      const displayName = acc.display_name.trim() || shortLabel;
+      const initial = (displayName.charAt(0) || '?').toUpperCase();
+      const njumpUrl = `https://njump.me/${encodeURIComponent(npub)}`;
+      const avatarHtml = acc.avatar_url
+        ? `<img class="user-avatar" src="${escHtml(acc.avatar_url)}" alt="${escHtml(displayName)}" loading="lazy" onerror="this.style.display='none';if(this.nextElementSibling)this.nextElementSibling.style.display='flex';"><span class="user-avatar-fallback" style="display:none">${escHtml(initial)}</span>`
+        : `<span class="user-avatar-fallback">${escHtml(initial)}</span>`;
+
+      return `
+  <a class="user-row" href="${njumpUrl}" target="_blank" rel="noopener noreferrer">
+    <span class="user-rank">#${i + 1}</span>
+    <div class="user-avatar-wrap">
+      ${avatarHtml}
+    </div>
+    <div class="user-info">
+      <span class="user-name">${escHtml(displayName)}</span>
+      <span class="user-pubkey">${escHtml(shortLabel)}</span>
+    </div>
+    <div class="user-score">${fmtNum(acc.count)} <span class="user-unit">${unitLabel}</span></div>
+  </a>`.trim();
+    })
+    .join('\n')}
+</div>`.trim();
 }
 
 // ---------------------------------------------------------------------------
@@ -443,19 +581,39 @@ function renderHot5Cards(hot5: DashboardData['hot5']): string {
       const labelText =
         acc.trend_label === 'surging' ? '↑↑ Surging' :
         acc.trend_label === 'rising' ? '↑ Rising' : '→ Stable';
+      let npub = acc.pubkey;
+      try {
+        npub = encodeNpub(acc.pubkey);
+      } catch {
+        // Non-fatal fallback
+      }
+      const shortLabel = shortenNpub(acc.pubkey);
+      const displayName = acc.display_name.trim() || shortLabel;
+      const njumpUrl = `https://njump.me/${encodeURIComponent(npub)}`;
+      const initial = (displayName.charAt(0) || '?').toUpperCase();
+      const avatarHtml = acc.avatar_url
+        ? `<img class="user-avatar" src="${escHtml(acc.avatar_url)}" alt="${escHtml(displayName)}" loading="lazy" onerror="this.style.display='none';if(this.nextElementSibling)this.nextElementSibling.style.display='flex';"><span class="user-avatar-fallback" style="display:none">${escHtml(initial)}</span>`
+        : `<span class="user-avatar-fallback">${escHtml(initial)}</span>`;
 
       return `
 <script type="application/json" id="data-spark-${i}">${island(acc.sparkline)}</script>
 <div class="trend-card">
-  <div class="trend-rank">#${i + 1} ${labelText.charAt(0) === '↑' ? '' : ''}</div>
-  <div class="trend-name">${escHtml(acc.display_name)}</div>
-  <div class="trend-pubkey">${escHtml(shortPubkey(acc.pubkey))}</div>
+  <div class="trend-card-header">
+    <div class="trend-rank">#${i + 1}</div>
+    <span class="${labelClass}">${labelText}</span>
+  </div>
+  <a class="trend-profile-link" href="${njumpUrl}" target="_blank" rel="noopener noreferrer">
+    <div class="user-avatar-wrap">
+      ${avatarHtml}
+    </div>
+    <div class="user-info">
+      <span class="trend-name">${escHtml(displayName)}</span>
+      <span class="trend-pubkey">${escHtml(shortLabel)}</span>
+    </div>
+  </a>
   <div class="trend-stats">
     <span>Posts today: <strong>${acc.posts_24h}</strong></span>
     <span>Mentions: <strong>${acc.mentions_24h}</strong></span>
-  </div>
-  <div class="trend-stats">
-    <span class="${labelClass}">${labelText}</span>
   </div>
   <div class="sparkline-wrap">
     <canvas id="spark-canvas-${i}" height="50"></canvas>
@@ -465,7 +623,7 @@ function renderHot5Cards(hot5: DashboardData['hot5']): string {
     .join('\n');
 }
 
-/** Escape HTML special characters to prevent XSS in text nodes. */
+/** Escape HTML special characters to prevent XSS in text nodes and attribute values. */
 function escHtml(s: string): string {
   return s
     .replace(/&/g, '&amp;')
@@ -512,6 +670,7 @@ export function renderDashboardHtml(data: DashboardData): string {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Nostr Cache Stats — ${escHtml(relay.name)}</title>
   <meta name="description" content="Live Nostr network statistics from ${escHtml(relay.name)}. Refreshed hourly.">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚡</text></svg>">
   <style>${CSS}</style>
 </head>
 <body>
@@ -593,23 +752,15 @@ export function renderDashboardHtml(data: DashboardData): string {
 <div class="leaderboard-grid">
   <div class="panel">
     <div class="section-title">Most Active Posters <span class="pill">Today</span></div>
-    <script type="application/json" id="data-c1">${leaderboardData(data.topPosters)}</script>
-    <div class="chart-wrap"><canvas id="chart-c1" height="220"></canvas></div>
+    ${renderLeaderboardList(data.topPosters, 'posts')}
   </div>
   <div class="panel">
     <div class="section-title">Most Active Sharers <span class="pill">Last 7 days</span></div>
-    <script type="application/json" id="data-c2">${leaderboardData(data.topSharers)}</script>
-    <div class="chart-wrap"><canvas id="chart-c2" height="220"></canvas></div>
+    ${renderLeaderboardList(data.topSharers, 'shares')}
   </div>
   <div class="panel">
     <div class="section-title">Most Followed Accounts</div>
-    <script type="application/json" id="data-c3">${leaderboardData(data.mostFollowed)}</script>
-    <div class="chart-wrap"><canvas id="chart-c3" height="220"></canvas></div>
-  </div>
-  <div class="panel">
-    <div class="section-title">Most Following Accounts</div>
-    <script type="application/json" id="data-c4">${leaderboardData(data.mostFollowing)}</script>
-    <div class="chart-wrap"><canvas id="chart-c4" height="220"></canvas></div>
+    ${renderLeaderboardList(data.mostFollowed, 'followers')}
   </div>
 </div>
 
@@ -625,7 +776,6 @@ ${renderHot5Cards(data.hot5)}
     <h4>Relay</h4>
     <div>${escHtml(relay.name)}</div>
     <div>v${escHtml(relay.version)}</div>
-    <div style="margin-top:0.5rem;font-size:0.7rem;font-family:monospace;word-break:break-all">${escHtml(relay.pubkey)}</div>
   </div>
   <div>
     <h4>Upstream Relays</h4>
@@ -643,11 +793,8 @@ ${renderHot5Cards(data.hot5)}
   </div>
 </footer>
 
-<!-- Chart.js v4.5.1 -->
-<script
-  src="${CHARTJS_CDN}"
-  integrity="${CHARTJS_SRI}"
-  crossorigin="anonymous"></script>
+<!-- Chart.js v4 UMD Bundle (Inlined for self-contained execution) -->
+<script>${CHARTJS_SOURCE}</script>
 
 <script>${chartScript()}</script>
 </body>
@@ -666,6 +813,7 @@ export function renderPlaceholderHtml(): string {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Nostr Cache Stats — Generating…</title>
   <meta http-equiv="refresh" content="60">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚡</text></svg>">
   <style>${CSS}
     .placeholder {
       display:flex;flex-direction:column;align-items:center;justify-content:center;

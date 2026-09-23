@@ -48,7 +48,7 @@ describe('HTTP Router', () => {
     expect(response.status).toBe(200);
   });
 
-  it('should route GET / to NIP-11 handler', async () => {
+  it('should route GET / to NIP-11 handler when Accept contains application/nostr+json', async () => {
     const request = new Request('https://cache.nostr.org.tr/', {
       method: 'GET',
       headers: {
@@ -62,6 +62,51 @@ describe('HTTP Router', () => {
 
     const json = (await response.json()) as { name: string };
     expect(json.name).toBe('cache.nostr.org.tr');
+  });
+
+  it('should route GET / to NIP-11 handler when Accept contains application/json', async () => {
+    const request = new Request('https://cache.nostr.org.tr/', {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+      },
+    });
+
+    const response = await handleHttpRequest(request, env);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Content-Type')).toContain('application/nostr+json');
+
+    const json = (await response.json()) as { name: string };
+    expect(json.name).toBe('cache.nostr.org.tr');
+  });
+
+  it('should route GET /?nip11=true or ?format=json to NIP-11 handler', async () => {
+    const req1 = new Request('https://cache.nostr.org.tr/?nip11=true');
+    const res1 = await handleHttpRequest(req1, env);
+    expect(res1.status).toBe(200);
+    expect(res1.headers.get('Content-Type')).toContain('application/nostr+json');
+
+    const req2 = new Request('https://cache.nostr.org.tr/?format=json');
+    const res2 = await handleHttpRequest(req2, env);
+    expect(res2.status).toBe(200);
+    expect(res2.headers.get('Content-Type')).toContain('application/nostr+json');
+  });
+
+  it('should route GET / to Landing page when Accept is text/html or standard browser request', async () => {
+    const request = new Request('https://cache.nostr.org.tr/', {
+      method: 'GET',
+      headers: {
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      },
+    });
+
+    const response = await handleHttpRequest(request, env);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Content-Type')).toContain('text/html');
+
+    const text = await response.text();
+    expect(text).toContain('cache.nostr.org.tr');
+    expect(text).toContain('nostr.org.tr');
   });
 
   it('should route GET /health to health handler', async () => {

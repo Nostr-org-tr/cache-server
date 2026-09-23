@@ -4,6 +4,7 @@ import { handleHealthRequest } from './health';
 import { handleNip11Request } from './nip11';
 import { handleStatsRequest } from './stats';
 import { handleDashboardRequest } from './dashboard';
+import { handleLandingRequest } from './landing';
 import { RATE_LIMIT_DEFAULTS, SlidingWindowLimiter } from '../security';
 
 let ipLimiter: SlidingWindowLimiter | null = null;
@@ -67,11 +68,21 @@ export async function handleHttpRequest(
     return stub.fetch(request);
   }
 
-  // 3. Route GET / HEAD requests
+  // 4. Route GET / HEAD requests
   if (request.method === 'GET' || request.method === 'HEAD') {
     switch (url.pathname) {
       case '/': {
-        return handleNip11Request(env);
+        const accept = request.headers.get('Accept') || '';
+        const wantsJson =
+          accept.includes('application/nostr+json') ||
+          accept.includes('application/json') ||
+          url.searchParams.has('nip11') ||
+          url.searchParams.get('format') === 'json';
+
+        if (wantsJson) {
+          return handleNip11Request(env);
+        }
+        return handleLandingRequest(request, env, _ctx);
       }
       case '/health': {
         return handleHealthRequest(env);
@@ -80,7 +91,19 @@ export async function handleHttpRequest(
         return handleStatsRequest(env);
       }
       case '/dashboard': {
-        return handleDashboardRequest(env, _ctx);
+        return handleDashboardRequest(request, env, _ctx);
+      }
+      case '/favicon.ico': {
+        return new Response(
+          `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">⚡</text></svg>`,
+          {
+            status: 200,
+            headers: {
+              'Content-Type': 'image/svg+xml',
+              'Cache-Control': 'public, max-age=86400',
+            },
+          }
+        );
       }
       default: {
         return jsonResponse(

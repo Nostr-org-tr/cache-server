@@ -8,6 +8,7 @@
  */
 
 import { getKindDescription } from '../http/stats';
+import { shortenNpub } from '../protocol/nip19';
 import type {
   AccountLeaderEntry,
   AgeBuckets,
@@ -229,16 +230,17 @@ export async function queryAgeBuckets(
 }
 
 // ---------------------------------------------------------------------------
-// Section B6 — Top Tag Usage (top 20, full cache)
+// Section B6 — Top Tag Usage (top 20 hashtags, full cache)
 // ---------------------------------------------------------------------------
 
 export async function queryTopTags(db: D1Database): Promise<TagEntry[]> {
   try {
     const result = await db
       .prepare(
-        `SELECT tag_name, COUNT(*) AS count
+        `SELECT LOWER(tag_value) AS tag_name, COUNT(*) AS count
          FROM event_tags
-         GROUP BY tag_name
+         WHERE tag_name = 't' AND tag_value != '' AND tag_value NOT IN ('d', 't', 'p', 'e', 'a', 'k', 'q', 'g', 'r')
+         GROUP BY LOWER(tag_value)
          ORDER BY count DESC
          LIMIT 20`
       )
@@ -258,12 +260,18 @@ export async function queryTopTags(db: D1Database): Promise<TagEntry[]> {
  * Kind 0 raw_event has the structure: {"content":"{\"name\":\"...\"}"}
  * content is a JSON string inside the outer JSON, requiring double extraction.
  */
-function profileNameExpr(pubkeyExpr: string, profileAlias: string): string {
+function profileNameExpr(profileAlias: string): string {
   return `COALESCE(
-    json_extract(json_extract(${profileAlias}.raw_event, '$.content'), '$.name'),
-    json_extract(json_extract(${profileAlias}.raw_event, '$.content'), '$.display_name'),
-    SUBSTR(${pubkeyExpr}, 1, 16) || '...'
+    NULLIF(json_extract(json_extract(${profileAlias}.raw_event, '$.content'), '$.display_name'), ''),
+    NULLIF(json_extract(json_extract(${profileAlias}.raw_event, '$.content'), '$.name'), '')
   )`;
+}
+
+/**
+ * Profile avatar extraction expression using SQLite json_extract.
+ */
+function profileAvatarExpr(profileAlias: string): string {
+  return `NULLIF(json_extract(json_extract(${profileAlias}.raw_event, '$.content'), '$.picture'), '')`;
 }
 
 // ---------------------------------------------------------------------------
@@ -281,7 +289,8 @@ export async function queryTopPosters(
         `SELECT
            e.pubkey,
            COUNT(*) AS count,
-           ${profileNameExpr('e.pubkey', 'p')} AS display_name
+           ${profileNameExpr('p')} AS display_name,
+           ${profileAvatarExpr('p')} AS avatar_url
          FROM events e
          LEFT JOIN events p ON p.pubkey = e.pubkey AND p.kind = 0
          WHERE e.kind = 1 AND e.created_at >= ?
@@ -290,8 +299,13 @@ export async function queryTopPosters(
          LIMIT 10`
       )
       .bind(since)
-      .all<{ pubkey: string; count: number; display_name: string }>();
-    return result.results ?? [];
+      .all<{ pubkey: string; count: number; display_name: string | null; avatar_url: string | null }>();
+    return (result.results ?? []).map((r) => ({
+      pubkey: r.pubkey,
+      count: r.count,
+      display_name: (r.display_name && r.display_name.trim()) || shortenNpub(r.pubkey),
+      avatar_url: r.avatar_url ?? null,
+    }));
   } catch {
     return [];
   }
@@ -312,7 +326,8 @@ export async function queryTopSharers(
         `SELECT
            e.pubkey,
            COUNT(*) AS count,
-           ${profileNameExpr('e.pubkey', 'p')} AS display_name
+           ${profileNameExpr('p')} AS display_name,
+           ${profileAvatarExpr('p')} AS avatar_url
          FROM events e
          LEFT JOIN events p ON p.pubkey = e.pubkey AND p.kind = 0
          WHERE e.kind IN (6, 16) AND e.created_at >= ?
@@ -321,8 +336,13 @@ export async function queryTopSharers(
          LIMIT 10`
       )
       .bind(since)
-      .all<{ pubkey: string; count: number; display_name: string }>();
-    return result.results ?? [];
+      .all<{ pubkey: string; count: number; display_name: string | null; avatar_url: string | null }>();
+    return (result.results ?? []).map((r) => ({
+      pubkey: r.pubkey,
+      count: r.count,
+      display_name: (r.display_name && r.display_name.trim()) || shortenNpub(r.pubkey),
+      avatar_url: r.avatar_url ?? null,
+    }));
   } catch {
     return [];
   }
@@ -339,7 +359,8 @@ export async function queryMostFollowed(db: D1Database): Promise<AccountLeaderEn
         `SELECT
            t.tag_value AS pubkey,
            COUNT(DISTINCT e.pubkey) AS count,
-           ${profileNameExpr('t.tag_value', 'p')} AS display_name
+           ${profileNameExpr('p')} AS display_name,
+           ${profileAvatarExpr('p')} AS avatar_url
          FROM event_tags t
          JOIN events e ON t.event_id = e.id AND e.kind = 3
          LEFT JOIN events p ON p.pubkey = t.tag_value AND p.kind = 0
@@ -348,35 +369,13 @@ export async function queryMostFollowed(db: D1Database): Promise<AccountLeaderEn
          ORDER BY count DESC
          LIMIT 10`
       )
-      .all<{ pubkey: string; count: number; display_name: string }>();
-    return result.results ?? [];
-  } catch {
-    return [];
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Section C4 — Most Following Accounts
-// ---------------------------------------------------------------------------
-
-export async function queryMostFollowing(db: D1Database): Promise<AccountLeaderEntry[]> {
-  try {
-    const result = await db
-      .prepare(
-        `SELECT
-           e.pubkey,
-           COUNT(t.tag_value) AS count,
-           ${profileNameExpr('e.pubkey', 'p')} AS display_name
-         FROM events e
-         JOIN event_tags t ON t.event_id = e.id AND t.tag_name = 'p'
-         LEFT JOIN events p ON p.pubkey = e.pubkey AND p.kind = 0
-         WHERE e.kind = 3
-         GROUP BY e.pubkey
-         ORDER BY count DESC
-         LIMIT 10`
-      )
-      .all<{ pubkey: string; count: number; display_name: string }>();
-    return result.results ?? [];
+      .all<{ pubkey: string; count: number; display_name: string | null; avatar_url: string | null }>();
+    return (result.results ?? []).map((r) => ({
+      pubkey: r.pubkey,
+      count: r.count,
+      display_name: (r.display_name && r.display_name.trim()) || shortenNpub(r.pubkey),
+      avatar_url: r.avatar_url ?? null,
+    }));
   } catch {
     return [];
   }
@@ -525,12 +524,13 @@ export async function queryHot5(
       return [];
     }
 
-    // Resolve display names for top 5 in a single batch
+    // Resolve display names & avatars for top 5 in a single batch
     const nameStmts = top5.map((c) =>
       db
         .prepare(
           `SELECT
-             ${profileNameExpr('e.pubkey', 'e')} AS display_name
+             ${profileNameExpr('e')} AS display_name,
+             ${profileAvatarExpr('e')} AS avatar_url
            FROM events e
            WHERE e.pubkey = ? AND e.kind = 0
            LIMIT 1`
@@ -538,12 +538,14 @@ export async function queryHot5(
         .bind(c.pubkey)
     );
 
-    let nameResults: Array<{ display_name: string } | undefined> = [];
+    let nameResults: Array<{ display_name: string | null; avatar_url: string | null } | undefined> = [];
     try {
-      const nameBatch = await db.batch<{ display_name: string }>(nameStmts);
-      nameResults = nameBatch.map((r) => r.results[0] as { display_name: string } | undefined);
+      const nameBatch = await db.batch<{ display_name: string | null; avatar_url: string | null }>(nameStmts);
+      nameResults = nameBatch.map(
+        (r) => r.results[0] as { display_name: string | null; avatar_url: string | null } | undefined
+      );
     } catch {
-      // Non-fatal — fall back to pubkey abbreviation
+      // Non-fatal — fall back to npub abbreviation
     }
 
     // Build sparklines from the already-fetched hourlyTimeline for these pubkeys.
@@ -575,7 +577,8 @@ export async function queryHot5(
     return top5.map((c, i) => {
       const nameRow = nameResults[i];
       const display_name =
-        nameRow?.display_name ?? `${c.pubkey.slice(0, 16)}...`;
+        (nameRow?.display_name && nameRow.display_name.trim()) || shortenNpub(c.pubkey);
+      const avatar_url = nameRow?.avatar_url ?? null;
 
       const sparklineRows: Array<{ hour_bucket: number; count: number }> =
         sparklineResults[i]?.results ?? [];
@@ -594,6 +597,7 @@ export async function queryHot5(
       return {
         pubkey: c.pubkey,
         display_name,
+        avatar_url,
         posts_24h: c.posts_24h,
         mentions_24h: c.mentions_24h,
         trend_score,

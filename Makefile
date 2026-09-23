@@ -9,12 +9,18 @@ NVM_EXEC := if [ -s "$$HOME/.nvm/nvm.sh" ]; then . "$$HOME/.nvm/nvm.sh"; fi; \
 		nvm use || nvm install; \
 	fi
 
-.PHONY: all install dev build test test-watch bench lint db-create db-migrate-local db-migrate-remote deploy tail verify-live clean version-check version-bump version-patch version-minor version-major version-set
+.PHONY: all install dev build build-css build-chartjs test test-watch bench lint db-create db-migrate-local db-migrate-remote deploy tail verify-live clean version-check version-bump version-patch version-minor version-major version-set
 
 all: lint test build
 
 install:
 	@$(NVM_EXEC) && npm install
+
+build-css:
+	@$(NVM_EXEC) && npm run build:css
+
+build-chartjs:
+	@$(NVM_EXEC) && npm run build:chartjs
 
 dev:
 	@$(NVM_EXEC) && npm run dev

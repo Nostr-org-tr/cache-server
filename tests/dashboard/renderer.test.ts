@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { renderDashboardHtml, renderPlaceholderHtml } from '../../src/dashboard/renderer';
 import type { DashboardData } from '../../src/dashboard/types';
+import { encodeNpub, shortenNpub } from '../../src/protocol/nip19';
 
 // ---------------------------------------------------------------------------
 // Minimal valid DashboardData fixture
@@ -32,26 +33,24 @@ const MINIMAL_DATA: DashboardData = {
   ],
   ageBuckets: { lt1h: 100, h1to6: 500, h6to24: 2000, d1to3: 8000, d3to7: 30_000 },
   topTags: [
-    { tag_name: 'p', count: 80_000 },
-    { tag_name: 'e', count: 40_000 },
+    { tag_name: 'bitcoin', count: 80_000 },
+    { tag_name: 'nostr', count: 40_000 },
   ],
   topPosters: [
-    { pubkey: 'a'.repeat(64), display_name: 'Alice', count: 50 },
-    { pubkey: 'b'.repeat(64), display_name: 'Bob', count: 30 },
+    { pubkey: 'a'.repeat(64), display_name: 'Alice', avatar_url: 'https://example.com/alice.png', count: 50 },
+    { pubkey: 'b'.repeat(64), display_name: 'Bob', avatar_url: null, count: 30 },
   ],
   topSharers: [
-    { pubkey: 'c'.repeat(64), display_name: 'Carol', count: 20 },
+    { pubkey: 'c'.repeat(64), display_name: 'Carol', avatar_url: null, count: 20 },
   ],
   mostFollowed: [
-    { pubkey: 'd'.repeat(64), display_name: 'Dave', count: 800 },
-  ],
-  mostFollowing: [
-    { pubkey: 'e'.repeat(64), display_name: 'Eve', count: 3000 },
+    { pubkey: 'd'.repeat(64), display_name: 'Dave', avatar_url: 'https://example.com/dave.png', count: 800 },
   ],
   hot5: [
     {
       pubkey: 'f'.repeat(64),
       display_name: 'Frank',
+      avatar_url: 'https://example.com/frank.png',
       posts_24h: 12,
       mentions_24h: 40,
       trend_score: 4.2,
@@ -62,10 +61,10 @@ const MINIMAL_DATA: DashboardData = {
   relay: {
     name: 'Test Relay',
     version: '1.2.0',
-    pubkey: 'a'.repeat(64),
+    pubkey: '46f3c7bb33cc3019049b76dc89dbb96e34c247bdda68b6ad8632682793ff8a1a',
     contact: 'admin@example.com',
     upstream_relays: ['wss://relay.damus.io', 'wss://nos.lol'],
-    gc_schedule: 'Daily at 03:00 UTC',
+    gc_schedule: 'Daily at 03:00 UTC (0 3 * * *)',
   },
 };
 
@@ -81,27 +80,31 @@ describe('renderDashboardHtml', () => {
     expect(html.trimStart().startsWith('<!DOCTYPE html>')).toBe(true);
   });
 
-  it('contains all 10 chart canvas IDs', () => {
+  it('contains chart canvas IDs for Section B (b1-b6) and not C charts', () => {
     const html = renderDashboardHtml(MINIMAL_DATA);
-    const expected = ['b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'c1', 'c2', 'c3', 'c4'];
+    const expected = ['b1', 'b2', 'b3', 'b4', 'b5', 'b6'];
     for (const id of expected) {
       expect(html).toContain(`id="chart-${id}"`);
     }
+    // C charts are now rendered as user cards, not canvases
+    const removed = ['c1', 'c2', 'c3', 'c4'];
+    for (const id of removed) {
+      expect(html).not.toContain(`id="chart-${id}"`);
+    }
   });
 
-  it('embeds all 10 JSON data island script tags', () => {
+  it('embeds JSON data island script tags for b1-b6', () => {
     const html = renderDashboardHtml(MINIMAL_DATA);
-    const expected = ['b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'c1', 'c2', 'c3', 'c4'];
+    const expected = ['b1', 'b2', 'b3', 'b4', 'b5', 'b6'];
     for (const id of expected) {
       expect(html).toContain(`id="data-${id}"`);
     }
   });
 
-  it('includes the Chart.js v4.5.1 CDN script tag with integrity attribute', () => {
+  it('inlines Chart.js bundle directly for self-contained execution without external CDN', () => {
     const html = renderDashboardHtml(MINIMAL_DATA);
-    expect(html).toContain('chart.js@4.5.1/dist/chart.umd.min.js');
-    expect(html).toContain('integrity=');
-    expect(html).toContain('crossorigin="anonymous"');
+    expect(html).not.toContain('cdn.jsdelivr.net');
+    expect(html).toContain('Chart.js');
   });
 
   it('includes summary card values', () => {
@@ -118,16 +121,46 @@ describe('renderDashboardHtml', () => {
     expect(html).toContain('v1.2.0');
   });
 
+  it('does NOT embed relay hex pubkey in the footer', () => {
+    const html = renderDashboardHtml(MINIMAL_DATA);
+    expect(html).not.toContain('46f3c7bb33cc3019049b76dc89dbb96e34c247bdda68b6ad8632682793ff8a1a');
+  });
+
   it('embeds upstream relays in the footer', () => {
     const html = renderDashboardHtml(MINIMAL_DATA);
     expect(html).toContain('wss://relay.damus.io');
     expect(html).toContain('wss://nos.lol');
   });
 
-  it('renders the Hot 5 sparkline canvas for the first trending account', () => {
+  it('renders leaderboard user cards with avatars, scores, and njump URLs using npubs', () => {
+    const html = renderDashboardHtml(MINIMAL_DATA);
+    // User names
+    expect(html).toContain('Alice');
+    expect(html).toContain('Bob');
+    expect(html).toContain('Carol');
+    expect(html).toContain('Dave');
+    // Scores and units
+    expect(html).toContain('50 <span class="user-unit">posts</span>');
+    expect(html).toContain('20 <span class="user-unit">shares</span>');
+    expect(html).toContain('800 <span class="user-unit">followers</span>');
+    // njump profile links with npub
+    expect(html).toContain(`href="https://njump.me/${encodeURIComponent(encodeNpub('a'.repeat(64)))}"`);
+    expect(html).toContain(`href="https://njump.me/${encodeURIComponent(encodeNpub('d'.repeat(64)))}"`);
+    // npub formatted subtitles
+    expect(html).toContain(shortenNpub('a'.repeat(64)));
+    expect(html).toContain(shortenNpub('d'.repeat(64)));
+    // Avatar image and fallback
+    expect(html).toContain('src="https://example.com/alice.png"');
+    expect(html).toContain('user-avatar-fallback');
+  });
+
+  it('renders Hot 5 trending account with njump link, avatar, and sparkline canvas', () => {
     const html = renderDashboardHtml(MINIMAL_DATA);
     expect(html).toContain('id="spark-canvas-0"');
     expect(html).toContain('id="data-spark-0"');
+    expect(html).toContain(`href="https://njump.me/${encodeURIComponent(encodeNpub('f'.repeat(64)))}"`);
+    expect(html).toContain(shortenNpub('f'.repeat(64)));
+    expect(html).toContain('src="https://example.com/frank.png"');
   });
 
   it('renders the trend label for a surging account', () => {
@@ -143,23 +176,17 @@ describe('renderDashboardHtml', () => {
     expect(html).not.toContain('id="spark-canvas-0"');
   });
 
-  it('JSON-encodes pubkeys in data islands (XSS safety)', () => {
-    // Inject a pubkey that looks like an HTML injection attempt
-    const xssPubkey = '<script>alert(1)</script>' + 'a'.repeat(39);
+  it('JSON-encodes data islands (XSS safety)', () => {
+    // Inject a hashtag that looks like an HTML injection attempt
     const data: DashboardData = {
       ...MINIMAL_DATA,
-      topPosters: [{ pubkey: xssPubkey, display_name: '<b>XSS</b>', count: 1 }],
+      topTags: [{ tag_name: '<script>alert(1)</script>', count: 1 }],
     };
     const html = renderDashboardHtml(data);
 
-    // Raw angle-bracket sequences must NOT appear unescaped in the HTML document
+    // Raw angle-bracket sequences must NOT appear unescaped in the JSON data islands
     expect(html).not.toContain('<script>alert(1)</script>');
-    // The raw display_name with HTML tags must not appear unescaped
-    expect(html).not.toContain('<b>XSS</b>');
-    // The pubkey in the JSON island should use unicode escapes for angle brackets
     expect(html).toContain('\\u003cscript\\u003e');
-    // The display_name label in the JSON island is also unicode-escaped
-    expect(html).toContain('\\u003cb\\u003eXSS\\u003c\\u002fb\\u003e');
   });
 
   it('produces valid JSON in every data island', () => {

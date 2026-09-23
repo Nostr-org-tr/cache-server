@@ -11,13 +11,19 @@ const DASHBOARD_KV_KEY = 'dashboard:html';
  * generates on demand so users see data immediately without waiting for the hourly cron.
  */
 export async function handleDashboardRequest(
+  request: Request,
   env: Env,
   _ctx?: ExecutionContext
 ): Promise<Response> {
   let html: string | null = null;
+  const url = new URL(request.url);
+  const forceRefresh =
+    url.searchParams.get('refresh') === 'true' ||
+    url.searchParams.get('force') === '1' ||
+    url.searchParams.get('force') === 'true';
 
-  // 1. Try fast KV cache read
-  if (env.CACHE_KV) {
+  // 1. Try fast KV cache read (unless force refresh requested)
+  if (env.CACHE_KV && !forceRefresh) {
     try {
       html = await env.CACHE_KV.get(DASHBOARD_KV_KEY, { type: 'text' });
     } catch (err) {
@@ -25,8 +31,8 @@ export async function handleDashboardRequest(
     }
   }
 
-  // 2. If not cached yet (or KV unavailable), generate on the fly
-  if (!html) {
+  // 2. If not cached yet (or force refresh requested), generate on the fly
+  if (!html || forceRefresh) {
     html = await generateDashboard(env);
   }
 
