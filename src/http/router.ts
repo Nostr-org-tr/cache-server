@@ -80,7 +80,7 @@ export async function handleHttpRequest(
         return handleStatsRequest(env);
       }
       case '/dashboard': {
-        return handleDashboardRequest(env);
+        return handleDashboardRequest(env, _ctx);
       }
       default: {
         return jsonResponse(

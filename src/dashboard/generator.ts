@@ -39,15 +39,10 @@ const DASHBOARD_KV_TTL_SECONDS = 7200;
  * Individual query failures are caught internally by each query function,
  * returning empty/zero data. This function itself never throws.
  */
-export async function generateDashboard(env: Env): Promise<void> {
-  if (!env.CACHE_KV) {
-    console.warn('[Dashboard] CACHE_KV binding is not configured — skipping dashboard generation');
-    return;
-  }
-
+export async function generateDashboard(env: Env): Promise<string | null> {
   if (!env.DB) {
     console.error('[Dashboard] DB binding is not configured — cannot generate dashboard');
-    return;
+    return null;
   }
 
   const startMs = Date.now();
@@ -125,9 +120,11 @@ export async function generateDashboard(env: Env): Promise<void> {
     const html = renderDashboardHtml(data);
     const htmlBytes = new TextEncoder().encode(html).byteLength;
 
-    await env.CACHE_KV.put(DASHBOARD_KV_KEY, html, {
-      expirationTtl: DASHBOARD_KV_TTL_SECONDS,
-    });
+    if (env.CACHE_KV) {
+      await env.CACHE_KV.put(DASHBOARD_KV_KEY, html, {
+        expirationTtl: DASHBOARD_KV_TTL_SECONDS,
+      });
+    }
 
     const durationMs = Date.now() - startMs;
     console.log(
@@ -136,10 +133,11 @@ export async function generateDashboard(env: Env): Promise<void> {
         `Events: ${summary.total_events}, Authors: ${summary.total_authors}, ` +
         `Hot5: ${hot5.length}`
     );
+
+    return html;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[Dashboard] Generation failed: ${msg}`);
-    // Do not re-throw — the cron handler uses waitUntil and a crash here
-    // would not surface to users; we just log and let the next hourly run retry.
+    return null;
   }
 }

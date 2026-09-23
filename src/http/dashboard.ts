@@ -1,59 +1,53 @@
-/**
- * HTTP /dashboard Handler
- *
- * Reads the pre-generated static HTML from Cloudflare KV and serves it.
- * Returns a 503 placeholder page on cold start (KV miss).
- */
-
 import type { Env } from '../types/env';
+import { generateDashboard } from '../dashboard/generator';
 import { renderPlaceholderHtml } from '../dashboard/renderer';
 import { createCorsHeaders } from './cors';
 
 const DASHBOARD_KV_KEY = 'dashboard:html';
 
 /**
- * Handles GET /dashboard — serves the pre-rendered static HTML dashboard.
+ * Handles GET /dashboard — serves the static HTML dashboard.
+ * If not yet cached in KV (e.g. cold start, first deploy, or local dev),
+ * generates on demand so users see data immediately without waiting for the hourly cron.
  */
-export async function handleDashboardRequest(env: Env): Promise<Response> {
-  if (!env.CACHE_KV) {
-    return new Response(renderPlaceholderHtml(), {
-      status: 503,
-      headers: createCorsHeaders({ 'Content-Type': 'text/html; charset=utf-8' }),
-    });
+export async function handleDashboardRequest(
+  env: Env,
+  _ctx?: ExecutionContext
+): Promise<Response> {
+  let html: string | null = null;
+
+  // 1. Try fast KV cache read
+  if (env.CACHE_KV) {
+    try {
+      html = await env.CACHE_KV.get(DASHBOARD_KV_KEY, { type: 'text' });
+    } catch (err) {
+      console.warn('[Dashboard] KV read failed, falling back to on-demand generation:', err);
+    }
   }
 
-  try {
-    const html = await env.CACHE_KV.get(DASHBOARD_KV_KEY, { type: 'text' });
+  // 2. If not cached yet (or KV unavailable), generate on the fly
+  if (!html) {
+    html = await generateDashboard(env);
+  }
 
-    if (html === null) {
-      // Dashboard not yet generated — return styled placeholder with auto-refresh
-      return new Response(renderPlaceholderHtml(), {
-        status: 503,
-        headers: createCorsHeaders({
-          'Content-Type': 'text/html; charset=utf-8',
-          'Retry-After': '60',
-          'Cache-Control': 'no-store',
-        }),
-      });
-    }
-
+  // 3. Return dashboard HTML if available
+  if (html) {
     return new Response(html, {
       status: 200,
       headers: createCorsHeaders({
         'Content-Type': 'text/html; charset=utf-8',
-        // Allow browsers to cache for up to 1 hour (matches generation cadence)
         'Cache-Control': 'public, max-age=3600, stale-while-revalidate=600',
       }),
     });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : 'KV read error';
-    console.error(`[Dashboard] KV read failed: ${msg}`);
-    return new Response(renderPlaceholderHtml(), {
-      status: 503,
-      headers: createCorsHeaders({
-        'Content-Type': 'text/html; charset=utf-8',
-        'Cache-Control': 'no-store',
-      }),
-    });
   }
+
+  // 4. Fallback if DB is unavailable or generation failed
+  return new Response(renderPlaceholderHtml(), {
+    status: 503,
+    headers: createCorsHeaders({
+      'Content-Type': 'text/html; charset=utf-8',
+      'Retry-After': '60',
+      'Cache-Control': 'no-store',
+    }),
+  });
 }
