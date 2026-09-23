@@ -28,8 +28,14 @@ export class MockD1Database implements D1Database {
     const results: D1Result<T>[] = [];
     for (const stmt of statements) {
       const mockStmt = stmt as MockD1PreparedStatement;
-      const res = await mockStmt.run<T>();
-      results.push(res);
+      const q = (mockStmt as unknown as { query: string }).query.trim().toUpperCase();
+      if (q.startsWith('INSERT') || q.startsWith('DELETE') || q.startsWith('UPDATE')) {
+        const res = await mockStmt.run<T>();
+        results.push(res);
+      } else {
+        const res = await mockStmt.all<T>();
+        results.push(res);
+      }
     }
     return results;
   }
@@ -90,7 +96,7 @@ export class MockD1PreparedStatement implements D1PreparedStatement {
     }
 
     // Query 0.1: SELECT COUNT(*) AS total FROM event_tags
-    if (q.includes('FROM event_tags') && q.includes('COUNT(*)')) {
+    if (q.includes('FROM event_tags') && (q.includes('COUNT(*) AS total') || q.includes('COUNT(*) as total')) && !q.includes('GROUP BY')) {
       return {
         results: [{ total: this.db.eventTags.length } as unknown as T],
         success: true,
@@ -139,13 +145,275 @@ export class MockD1PreparedStatement implements D1PreparedStatement {
       for (const ev of this.db.events.values()) {
         counts.set(ev.kind, (counts.get(ev.kind) || 0) + 1);
       }
-      const sorted = Array.from(counts.entries())
+      let sorted = Array.from(counts.entries())
         .map(([kind, count]) => ({ kind, count }))
         .sort((a, b) => b.count - a.count);
+      const limitMatch = q.match(/LIMIT\s+(\d+)/i);
+      if (limitMatch && limitMatch[1]) {
+        sorted = sorted.slice(0, parseInt(limitMatch[1], 10));
+      }
       return {
         results: sorted as unknown as T[],
         success: true,
         meta: createMockMeta({ rows_read: sorted.length }),
+      };
+    }
+
+    // Dashboard B1: Hourly timeline (hour_bucket)
+    if (q.includes('AS hour_bucket') && q.includes('GROUP BY hour_bucket')) {
+      const isSparkline = q.includes('pubkey = ?');
+      let events = Array.from(this.db.events.values());
+      if (isSparkline) {
+        const pubkey = this.boundParams[0] as string;
+        const since = this.boundParams[1] as number;
+        events = events.filter((e) => e.pubkey === pubkey && e.kind === 1 && e.created_at >= since);
+      } else {
+        const since = this.boundParams[0] as number;
+        const kinds = this.boundParams.slice(1) as number[];
+        events = events.filter((e) => e.created_at >= since && (kinds.length === 0 || kinds.includes(e.kind)));
+      }
+      const buckets = new Map<number, number>();
+      for (const ev of events) {
+        const b = Math.floor(ev.created_at / 3600) * 3600;
+        buckets.set(b, (buckets.get(b) || 0) + 1);
+      }
+      const sorted = Array.from(buckets.entries())
+        .map(([hour_bucket, count]) => ({ hour_bucket, count }))
+        .sort((a, b) => a.hour_bucket - b.hour_bucket);
+      return {
+        results: sorted as unknown as T[],
+        success: true,
+        meta: createMockMeta({ rows_read: sorted.length }),
+      };
+    }
+
+    // Dashboard B2: Hour of day
+    if (q.includes('AS hour_of_day') && q.includes('GROUP BY hour_of_day')) {
+      const buckets = new Map<number, number>();
+      for (const ev of this.db.events.values()) {
+        const h = Math.floor((ev.created_at % 86400) / 3600);
+        buckets.set(h, (buckets.get(h) || 0) + 1);
+      }
+      const sorted = Array.from(buckets.entries())
+        .map(([hour_of_day, count]) => ({ hour_of_day, count }))
+        .sort((a, b) => a.hour_of_day - b.hour_of_day);
+      return {
+        results: sorted as unknown as T[],
+        success: true,
+        meta: createMockMeta({ rows_read: sorted.length }),
+      };
+    }
+
+    // Dashboard B3: Daily volume (day_bucket)
+    if (q.includes('AS day_bucket') && q.includes('GROUP BY day_bucket')) {
+      const since = this.boundParams[0] as number;
+      const kinds = this.boundParams.slice(1) as number[];
+      const events = Array.from(this.db.events.values()).filter(
+        (e) => e.created_at >= since && (kinds.length === 0 || kinds.includes(e.kind))
+      );
+      const buckets = new Map<number, number>();
+      for (const ev of events) {
+        const d = Math.floor(ev.created_at / 86400) * 86400;
+        buckets.set(d, (buckets.get(d) || 0) + 1);
+      }
+      const sorted = Array.from(buckets.entries())
+        .map(([day_bucket, count]) => ({ day_bucket, count }))
+        .sort((a, b) => a.day_bucket - b.day_bucket);
+      return {
+        results: sorted as unknown as T[],
+        success: true,
+        meta: createMockMeta({ rows_read: sorted.length }),
+      };
+    }
+
+    // Dashboard B5: Age buckets count queries
+    if (q.includes('FROM events WHERE created_at >=')) {
+      if (q.includes('AND created_at < ?')) {
+        const since = this.boundParams[0] as number;
+        const until = this.boundParams[1] as number;
+        const count = Array.from(this.db.events.values()).filter(
+          (e) => e.created_at >= since && e.created_at < until
+        ).length;
+        return {
+          results: [{ count } as unknown as T],
+          success: true,
+          meta: createMockMeta({ rows_read: count }),
+        };
+      } else {
+        const since = this.boundParams[0] as number;
+        const count = Array.from(this.db.events.values()).filter(
+          (e) => e.created_at >= since
+        ).length;
+        return {
+          results: [{ count } as unknown as T],
+          success: true,
+          meta: createMockMeta({ rows_read: count }),
+        };
+      }
+    }
+
+    // Dashboard B6: Top tags
+    if (q.includes('FROM event_tags') && q.includes('GROUP BY tag_name')) {
+      const tagCounts = new Map<string, number>();
+      for (const t of this.db.eventTags) {
+        tagCounts.set(t.tag_name, (tagCounts.get(t.tag_name) || 0) + 1);
+      }
+      let sorted = Array.from(tagCounts.entries())
+        .map(([tag_name, count]) => ({ tag_name, count }))
+        .sort((a, b) => b.count - a.count);
+      const limitMatch = q.match(/LIMIT\s+(\d+)/i);
+      if (limitMatch && limitMatch[1]) {
+        sorted = sorted.slice(0, parseInt(limitMatch[1], 10));
+      }
+      return {
+        results: sorted as unknown as T[],
+        success: true,
+        meta: createMockMeta({ rows_read: sorted.length }),
+      };
+    }
+
+    // Dashboard C1 / C2: Leaderboard Posters / Sharers
+    if (q.includes('GROUP BY e.pubkey') && q.includes('FROM events e')) {
+      if (q.includes('e.kind = 3')) {
+        // C4: Most Following
+        const counts = new Map<string, number>();
+        for (const [eventId, ev] of this.db.events.entries()) {
+          if (ev.kind === 3) {
+            const pTags = this.db.eventTags.filter((t) => t.event_id === eventId && t.tag_name === 'p');
+            counts.set(ev.pubkey, pTags.length);
+          }
+        }
+        let sorted = Array.from(counts.entries())
+          .map(([pubkey, count]) => {
+            const profile = Array.from(this.db.events.values()).find((e) => e.pubkey === pubkey && e.kind === 0);
+            return {
+              pubkey,
+              count,
+              display_name: profile ? 'Profile Name' : `${pubkey.slice(0, 16)}...`,
+            };
+          })
+          .sort((a, b) => b.count - a.count);
+        return {
+          results: sorted.slice(0, 10) as unknown as T[],
+          success: true,
+          meta: createMockMeta({ rows_read: sorted.length }),
+        };
+      }
+
+      const since = this.boundParams[0] as number;
+      const isKind1 = q.includes('e.kind = 1');
+      const isSharer = q.includes('e.kind IN (6, 16)');
+      const counts = new Map<string, number>();
+
+      for (const ev of this.db.events.values()) {
+        if (ev.created_at >= since) {
+          if (isKind1 && ev.kind === 1) {
+            counts.set(ev.pubkey, (counts.get(ev.pubkey) || 0) + 1);
+          } else if (isSharer && (ev.kind === 6 || ev.kind === 16)) {
+            counts.set(ev.pubkey, (counts.get(ev.pubkey) || 0) + 1);
+          }
+        }
+      }
+
+      let sorted = Array.from(counts.entries())
+        .map(([pubkey, count]) => {
+          const profile = Array.from(this.db.events.values()).find((e) => e.pubkey === pubkey && e.kind === 0);
+          return {
+            pubkey,
+            count,
+            display_name: profile ? 'Profile Name' : `${pubkey.slice(0, 16)}...`,
+          };
+        })
+        .sort((a, b) => b.count - a.count);
+
+      return {
+        results: sorted.slice(0, 10) as unknown as T[],
+        success: true,
+        meta: createMockMeta({ rows_read: sorted.length }),
+      };
+    }
+
+    // Dashboard C3: Most Followed
+    if (q.includes('FROM event_tags t') && q.includes('JOIN events e') && q.includes('e.kind = 3') && q.includes('GROUP BY t.tag_value')) {
+      const followersMap = new Map<string, Set<string>>();
+      for (const t of this.db.eventTags) {
+        if (t.tag_name === 'p') {
+          const parentEv = this.db.events.get(t.event_id);
+          if (parentEv && parentEv.kind === 3) {
+            if (!followersMap.has(t.tag_value)) {
+              followersMap.set(t.tag_value, new Set());
+            }
+            followersMap.get(t.tag_value)!.add(parentEv.pubkey);
+          }
+        }
+      }
+      let sorted = Array.from(followersMap.entries())
+        .map(([pubkey, followerSet]) => {
+          const profile = Array.from(this.db.events.values()).find((e) => e.pubkey === pubkey && e.kind === 0);
+          return {
+            pubkey,
+            count: followerSet.size,
+            display_name: profile ? 'Profile Name' : `${pubkey.slice(0, 16)}...`,
+          };
+        })
+        .sort((a, b) => b.count - a.count);
+
+      return {
+        results: sorted.slice(0, 10) as unknown as T[],
+        success: true,
+        meta: createMockMeta({ rows_read: sorted.length }),
+      };
+    }
+
+    // Dashboard D (Hot 5): Post counts in window
+    if (q.includes('FROM events') && q.includes('WHERE kind = 1 AND created_at >=') && q.includes('GROUP BY pubkey')) {
+      const since = this.boundParams[0] as number;
+      const until = this.boundParams[1] as number | undefined;
+      const counts = new Map<string, number>();
+      for (const ev of this.db.events.values()) {
+        if (ev.kind === 1 && ev.created_at >= since && (until === undefined || ev.created_at < until)) {
+          counts.set(ev.pubkey, (counts.get(ev.pubkey) || 0) + 1);
+        }
+      }
+      const results = Array.from(counts.entries()).map(([pubkey, count]) => ({ pubkey, count }));
+      return {
+        results: results as unknown as T[],
+        success: true,
+        meta: createMockMeta({ rows_read: results.length }),
+      };
+    }
+
+    // Dashboard D (Hot 5): Mention counts in window
+    if (q.includes('FROM event_tags t') && q.includes('WHERE t.tag_name = \'p\' AND e.created_at >=') && q.includes('GROUP BY t.tag_value')) {
+      const since = this.boundParams[0] as number;
+      const until = this.boundParams[1] as number | undefined;
+      const counts = new Map<string, number>();
+      for (const t of this.db.eventTags) {
+        if (t.tag_name === 'p') {
+          const ev = this.db.events.get(t.event_id);
+          if (ev && (ev.kind === 1 || ev.kind === 6 || ev.kind === 7)) {
+            if (ev.created_at >= since && (until === undefined || ev.created_at < until)) {
+              counts.set(t.tag_value, (counts.get(t.tag_value) || 0) + 1);
+            }
+          }
+        }
+      }
+      const results = Array.from(counts.entries()).map(([pubkey, count]) => ({ pubkey, count }));
+      return {
+        results: results as unknown as T[],
+        success: true,
+        meta: createMockMeta({ rows_read: results.length }),
+      };
+    }
+
+    // Dashboard Hot 5 name resolution
+    if (q.includes('WHERE e.pubkey = ? AND e.kind = 0') || (q.includes('display_name') && q.includes('e.kind = 0'))) {
+      const pubkey = this.boundParams[0] as string;
+      const profile = Array.from(this.db.events.values()).find((e) => e.pubkey === pubkey && e.kind === 0);
+      return {
+        results: [{ display_name: profile ? 'Profile Name' : `${pubkey.slice(0, 16)}...` } as unknown as T],
+        success: true,
+        meta: createMockMeta({ rows_read: 1 }),
       };
     }
 

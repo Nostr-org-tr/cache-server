@@ -3,6 +3,7 @@ import { handleCorsPreflight, jsonResponse } from './cors';
 import { handleHealthRequest } from './health';
 import { handleNip11Request } from './nip11';
 import { handleStatsRequest } from './stats';
+import { handleDashboardRequest } from './dashboard';
 import { RATE_LIMIT_DEFAULTS, SlidingWindowLimiter } from '../security';
 
 let ipLimiter: SlidingWindowLimiter | null = null;
@@ -77,6 +78,9 @@ export async function handleHttpRequest(
       }
       case '/stats': {
         return handleStatsRequest(env);
+      }
+      case '/dashboard': {
+        return handleDashboardRequest(env);
       }
       default: {
         return jsonResponse(
