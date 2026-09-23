@@ -29,7 +29,7 @@
   },
   "dependencies": {
     "@noble/curves": "^1.8.1",
-    "@noble/hashes": "^1.7.1"
+    "@noble/hashes": "^2.4.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250214.0",
