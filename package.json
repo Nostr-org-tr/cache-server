@@ -34,7 +34,7 @@
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250214.0",
     "@tailwindcss/cli": "^4.3.3",
-    "@types/node": "^22.13.4",
+    "@types/node": "^26.6.2",
     "chart.js": "^4.4.8",
     "flyonui": "^2.4.1",
     "tailwindcss": "^4.3.3",
