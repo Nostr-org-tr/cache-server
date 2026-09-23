@@ -275,6 +275,31 @@ export class MockD1PreparedStatement implements D1PreparedStatement {
       };
     }
 
+    // Dashboard B7: Top clients
+    if (q.includes('FROM event_tags') && q.includes('tag_name = \'client\'')) {
+      const clientCounts = new Map<string, number>();
+      for (const t of this.db.eventTags) {
+        if (t.tag_name === 'client' && t.tag_value) {
+          const val = t.tag_value.trim().toLowerCase();
+          if (val) {
+            clientCounts.set(val, (clientCounts.get(val) || 0) + 1);
+          }
+        }
+      }
+      let sorted = Array.from(clientCounts.entries())
+        .map(([client, count]) => ({ client, count }))
+        .sort((a, b) => b.count - a.count);
+      const limitMatch = q.match(/LIMIT\s+(\d+)/i);
+      if (limitMatch && limitMatch[1]) {
+        sorted = sorted.slice(0, parseInt(limitMatch[1], 10));
+      }
+      return {
+        results: sorted as unknown as T[],
+        success: true,
+        meta: createMockMeta({ rows_read: sorted.length }),
+      };
+    }
+
     // Dashboard C1 / C2: Leaderboard Posters / Sharers
     if (q.includes('GROUP BY e.pubkey') && q.includes('FROM events e')) {
       const since = this.boundParams[0] as number;

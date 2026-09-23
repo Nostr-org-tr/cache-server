@@ -35,6 +35,11 @@ export interface TagEntry {
   readonly count: number;
 }
 
+export interface ClientEntry {
+  readonly client: string;
+  readonly count: number;
+}
+
 export interface AgeBuckets {
   readonly lt1h: number;
   readonly h1to6: number;
@@ -99,6 +104,7 @@ export interface DashboardData {
   readonly kindDist: readonly KindEntry[];               // B4: top 15 kinds
   readonly ageBuckets: AgeBuckets;                       // B5: freshness doughnut
   readonly topTags: readonly TagEntry[];                 // B6: top 20 hashtags
+  readonly topClients: readonly ClientEntry[];           // B7: top 15 clients
   readonly topPosters: readonly AccountLeaderEntry[];    // C1: most posts today
   readonly topSharers: readonly AccountLeaderEntry[];    // C2: most reposts 7d
   readonly mostFollowed: readonly AccountLeaderEntry[];  // C3: most followed

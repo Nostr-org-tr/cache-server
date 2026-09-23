@@ -36,6 +36,10 @@ const MINIMAL_DATA: DashboardData = {
     { tag_name: 'bitcoin', count: 80_000 },
     { tag_name: 'nostr', count: 40_000 },
   ],
+  topClients: [
+    { client: 'Damus', count: 12_000 },
+    { client: 'Coracle', count: 8_000 },
+  ],
   topPosters: [
     { pubkey: 'a'.repeat(64), display_name: 'Alice', avatar_url: 'https://example.com/alice.png', count: 50 },
     { pubkey: 'b'.repeat(64), display_name: 'Bob', avatar_url: null, count: 30 },
@@ -80,9 +84,9 @@ describe('renderDashboardHtml', () => {
     expect(html.trimStart().startsWith('<!DOCTYPE html>')).toBe(true);
   });
 
-  it('contains chart canvas IDs for Section B (b1-b6) and not C charts', () => {
+  it('contains chart canvas IDs for Section B (b1-b7) and not C charts', () => {
     const html = renderDashboardHtml(MINIMAL_DATA);
-    const expected = ['b1', 'b2', 'b3', 'b4', 'b5', 'b6'];
+    const expected = ['b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7'];
     for (const id of expected) {
       expect(html).toContain(`id="chart-${id}"`);
     }
@@ -93,9 +97,9 @@ describe('renderDashboardHtml', () => {
     }
   });
 
-  it('embeds JSON data island script tags for b1-b6', () => {
+  it('embeds JSON data island script tags for b1-b7', () => {
     const html = renderDashboardHtml(MINIMAL_DATA);
-    const expected = ['b1', 'b2', 'b3', 'b4', 'b5', 'b6'];
+    const expected = ['b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7'];
     for (const id of expected) {
       expect(html).toContain(`id="data-${id}"`);
     }

@@ -12,6 +12,7 @@ import { shortenNpub } from '../protocol/nip19';
 import type {
   AccountLeaderEntry,
   AgeBuckets,
+  ClientEntry,
   DashboardSummary,
   DayBucket,
   HourlyBucket,
@@ -246,6 +247,85 @@ export async function queryTopTags(db: D1Database): Promise<TagEntry[]> {
       )
       .all<{ tag_name: string; count: number }>();
     return result.results ?? [];
+  } catch {
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Section B7 — Most Used Clients (top 15, full cache)
+// ---------------------------------------------------------------------------
+
+const KNOWN_CLIENT_NAMES: Record<string, string> = {
+  damus: 'Damus',
+  amethyst: 'Amethyst',
+  coracle: 'Coracle',
+  primal: 'Primal',
+  'primal-web': 'Primal Web',
+  'primal web': 'Primal Web',
+  snort: 'Snort',
+  yakihonne: 'Yakihonne',
+  'nostr band': 'Nostr Band',
+  'nostr-band': 'Nostr Band',
+  iris: 'Iris',
+  gossip: 'Gossip',
+  lume: 'Lume',
+  ditto: 'Ditto',
+  nos: 'Nos',
+  nostrudel: 'Nostrudel',
+  habla: 'Habla',
+  wikifreedia: 'Wikifreedia',
+  zapstream: 'ZapStream',
+  blowater: 'Blowater',
+  satellite: 'Satellite',
+  nostrchat: 'NostrChat',
+  flock: 'Flock',
+  nozzle: 'Nozzle',
+  current: 'Current',
+  simplex: 'SimpleX',
+  futfut: 'FutFut',
+  gleasonator: 'Gleasonator',
+  'nostr-tools': 'nostr-tools',
+};
+
+/**
+ * Normalizes client name strings into clean, human-readable display names.
+ */
+export function formatClientName(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return 'Unknown';
+  const lower = trimmed.toLowerCase();
+  if (KNOWN_CLIENT_NAMES[lower]) {
+    return KNOWN_CLIENT_NAMES[lower];
+  }
+  // If it's a NIP-89 31990 address or similar identifier (31990:<pubkey>:<d_tag>)
+  if (lower.startsWith('31990:')) {
+    const parts = trimmed.split(':');
+    return parts[2] ? `App: ${parts[2]}` : trimmed;
+  }
+  // Title-case single/multi-word client names
+  return trimmed
+    .split(/[-_\s]+/)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join(' ');
+}
+
+export async function queryTopClients(db: D1Database): Promise<ClientEntry[]> {
+  try {
+    const result = await db
+      .prepare(
+        `SELECT LOWER(TRIM(tag_value)) AS client, COUNT(*) AS count
+         FROM event_tags
+         WHERE tag_name = 'client' AND tag_value != ''
+         GROUP BY LOWER(TRIM(tag_value))
+         ORDER BY count DESC
+         LIMIT 15`
+      )
+      .all<{ client: string; count: number }>();
+    return (result.results ?? []).map((r) => ({
+      client: formatClientName(r.client),
+      count: r.count,
+    }));
   } catch {
     return [];
   }

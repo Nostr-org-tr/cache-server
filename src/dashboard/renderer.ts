@@ -103,6 +103,12 @@ function topTagsData(rows: readonly { tag_name: string; count: number }[]): stri
   return island({ labels, data });
 }
 
+function topClientsData(rows: readonly { client: string; count: number }[]): string {
+  const labels = rows.map((r) => r.client);
+  const data = rows.map((r) => r.count);
+  return island({ labels, data });
+}
+
 // ---------------------------------------------------------------------------
 // CSS
 // ---------------------------------------------------------------------------
@@ -510,6 +516,7 @@ function chartScript(): string {
   initBar('b4', true);
   initDoughnut('b5');
   initBar('b6', true);
+  initBar('b7', true);
 
   // Hot 5 sparklines
   for (var i = 0; i < 5; i++) {
@@ -729,22 +736,31 @@ export function renderDashboardHtml(data: DashboardData): string {
   </div>
 </div>
 
-<!-- ── Section B4 + B5 + B6 ── -->
-<div class="grid-3">
+<!-- ── Section B4 + B5: Event Types & Age ── -->
+<div class="grid-2">
   <div class="panel">
     <div class="section-title">Kind Distribution <span class="pill">Top 15</span></div>
     <script type="application/json" id="data-b4">${kindDistData(data.kindDist)}</script>
-    <div class="chart-wrap"><canvas id="chart-b4" height="260"></canvas></div>
+    <div class="chart-wrap"><canvas id="chart-b4" height="240"></canvas></div>
   </div>
   <div class="panel">
     <div class="section-title">Cache Freshness</div>
     <script type="application/json" id="data-b5">${ageBucketsData(data.ageBuckets)}</script>
-    <div class="chart-wrap"><canvas id="chart-b5" height="260"></canvas></div>
+    <div class="chart-wrap"><canvas id="chart-b5" height="240"></canvas></div>
   </div>
+</div>
+
+<!-- ── Section B6 + B7: Tags & Clients ── -->
+<div class="grid-2">
   <div class="panel">
     <div class="section-title">Top Tags <span class="pill">Top 20</span></div>
     <script type="application/json" id="data-b6">${topTagsData(data.topTags)}</script>
-    <div class="chart-wrap"><canvas id="chart-b6" height="260"></canvas></div>
+    <div class="chart-wrap"><canvas id="chart-b6" height="240"></canvas></div>
+  </div>
+  <div class="panel">
+    <div class="section-title">Most Used Clients <span class="pill">Top 15</span></div>
+    <script type="application/json" id="data-b7">${topClientsData(data.topClients)}</script>
+    <div class="chart-wrap"><canvas id="chart-b7" height="240"></canvas></div>
   </div>
 </div>
 

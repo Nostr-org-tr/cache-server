@@ -8,9 +8,11 @@ import {
   queryKindDistribution,
   queryMostFollowed,
   querySummary,
+  queryTopClients,
   queryTopPosters,
   queryTopSharers,
   queryTopTags,
+  formatClientName,
 } from '../../src/dashboard/queries';
 import { MockD1Database } from '../mocks/mock-d1';
 
@@ -257,6 +259,57 @@ describe('queryTopTags', () => {
     expect(result[1]?.tag_name).toBe('nostr');
     expect(result[1]?.count).toBe(1);
     expect(result.some((r) => r.tag_name === 'p' || r.tag_name === 'd' || r.tag_name === 'e')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// formatClientName
+// ---------------------------------------------------------------------------
+
+describe('formatClientName', () => {
+  it('formats known clients with canonical casing', () => {
+    expect(formatClientName('damus')).toBe('Damus');
+    expect(formatClientName('DAMUS')).toBe('Damus');
+    expect(formatClientName('amethyst')).toBe('Amethyst');
+    expect(formatClientName('coracle')).toBe('Coracle');
+    expect(formatClientName('primal-web')).toBe('Primal Web');
+    expect(formatClientName('nostr-tools')).toBe('nostr-tools');
+  });
+
+  it('handles NIP-89 app handler formats and generic client names', () => {
+    expect(formatClientName('31990:pubkey:my-app')).toBe('App: my-app');
+    expect(formatClientName('custom_client')).toBe('Custom Client');
+    expect(formatClientName('')).toBe('Unknown');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// queryTopClients
+// ---------------------------------------------------------------------------
+
+describe('queryTopClients', () => {
+  it('returns empty array on empty tag table', async () => {
+    const db = makeDb();
+    const result = await queryTopClients(db as unknown as D1Database);
+    expect(result).toEqual([]);
+  });
+
+  it('counts, normalizes and sorts clients by frequency', async () => {
+    const db = makeDb();
+    addEvent(db, { id: 'e1', pubkey: 'p1', kind: 1 });
+    addEvent(db, { id: 'e2', pubkey: 'p1', kind: 1 });
+    addEvent(db, { id: 'e3', pubkey: 'p2', kind: 1 });
+
+    db.eventTags.push({ event_id: 'e1', tag_name: 'client', tag_value: 'Damus' });
+    db.eventTags.push({ event_id: 'e2', tag_name: 'client', tag_value: 'damus' });
+    db.eventTags.push({ event_id: 'e3', tag_name: 'client', tag_value: 'Coracle' });
+
+    const result = await queryTopClients(db as unknown as D1Database);
+    expect(result).toHaveLength(2);
+    expect(result[0]?.client).toBe('Damus');
+    expect(result[0]?.count).toBe(2);
+    expect(result[1]?.client).toBe('Coracle');
+    expect(result[1]?.count).toBe(1);
   });
 });
 

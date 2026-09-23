@@ -41,6 +41,7 @@ describe('HTTP /stats Endpoint', () => {
       created_at_recorded: 1002,
     });
     mockDb.eventTags.push({ event_id: 'e1', tag_name: 'p', tag_value: 'p2' });
+    mockDb.eventTags.push({ event_id: 'e1', tag_name: 'client', tag_value: 'Damus' });
 
     const mockKv = new MockKVNamespace();
     await mockKv.put('evt:e1', JSON.stringify({ id: 'e1' }));
@@ -77,7 +78,7 @@ describe('HTTP /stats Endpoint', () => {
     expect(json.service).toBe('cache.nostr.org.tr');
     expect(json.version).toBe(APP_VERSION);
     expect(json.cache.total_events).toBe(3);
-    expect(json.cache.total_tags).toBe(1);
+    expect(json.cache.total_tags).toBe(2);
     expect(json.cache.total_authors).toBe(2);
     expect(json.cache.time_range).toEqual({
       oldest_event_at: 1000,
@@ -86,6 +87,9 @@ describe('HTTP /stats Endpoint', () => {
     expect(json.cache.kind_distribution).toEqual([
       { kind: 1, name: 'Short Text Note', count: 2 },
       { kind: 0, name: 'User Metadata / Profile', count: 1 },
+    ]);
+    expect(json.cache.client_distribution).toEqual([
+      { client: 'Damus', count: 1 },
     ]);
 
     // KV Telemetry checks

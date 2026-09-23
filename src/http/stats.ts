@@ -13,10 +13,16 @@ import type { Env } from '../types/env';
 import { DEFAULT_UPSTREAM_RELAYS } from '../upstream/pool-manager';
 import { APP_NAME, APP_VERSION } from '../version';
 import { jsonResponse } from './cors';
+import { formatClientName } from '../dashboard/queries';
 
 export interface KindDistribution {
   kind: number;
   name: string;
+  count: number;
+}
+
+export interface ClientDistribution {
+  client: string;
   count: number;
 }
 
@@ -59,6 +65,7 @@ export interface RelayStatsResponse {
       newest_event_at: number | null;
     };
     kind_distribution: KindDistribution[];
+    client_distribution: ClientDistribution[];
   };
   kv: KvStats;
   relay: {
@@ -335,6 +342,27 @@ export async function handleStatsRequest(env: Env): Promise<Response> {
       // Non-fatal
     }
 
+    // 5.1 Client distribution (top 15)
+    let clientDistribution: ClientDistribution[] = [];
+    try {
+      const clientDistResult = await env.DB.prepare(
+        `SELECT LOWER(TRIM(tag_value)) AS client, COUNT(*) AS count
+         FROM event_tags
+         WHERE tag_name = 'client' AND tag_value != ''
+         GROUP BY LOWER(TRIM(tag_value))
+         ORDER BY count DESC
+         LIMIT 15`
+      ).all<{ client: string; count: number }>();
+      if (clientDistResult && Array.isArray(clientDistResult.results)) {
+        clientDistribution = clientDistResult.results.map((r) => ({
+          client: formatClientName(r.client),
+          count: r.count,
+        }));
+      }
+    } catch {
+      // Non-fatal
+    }
+
     // 6. Collect KV Cache Telemetry (if enabled)
     const kvBinding = env.ENABLE_KV_CACHE === 'false' ? undefined : env.CACHE_KV;
     const kvStats = await collectKvStats(kvBinding);
@@ -373,6 +401,7 @@ export async function handleStatsRequest(env: Env): Promise<Response> {
           newest_event_at: newestEventAt,
         },
         kind_distribution: kindDistribution,
+        client_distribution: clientDistribution,
       },
       kv: kvStats,
       relay: {
