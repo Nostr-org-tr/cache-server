@@ -18,7 +18,7 @@ export function buildNip11Document(env: Env): Nip11RelayInformation {
     description: env.RELAY_DESCRIPTION || APP_DESCRIPTION,
     pubkey: env.RELAY_PUBKEY || '',
     contact: env.RELAY_CONTACT || APP_CONTACT,
-    supported_nips: [1, 9, 11, 16, 20, 33],
+    supported_nips: [1, 9, 11, 16, 20, 33, 50],
     software: APP_REPOSITORY,
     version: APP_VERSION,
     limitation: {

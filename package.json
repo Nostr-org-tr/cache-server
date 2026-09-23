@@ -25,7 +25,22 @@
     "db:create": "wrangler d1 create nostr_cache_db",
     "db:migrate:local": "wrangler d1 migrations apply nostr_cache_db --local",
     "db:migrate:remote": "wrangler d1 migrations apply nostr_cache_db --remote",
-    "verify:live": "node --experimental-strip-types scripts/verify-relay.ts"
+    "cache:prune": "node --experimental-strip-types scripts/prune-cache.ts",
+    "cache:prune:all": "node --experimental-strip-types scripts/prune-cache.ts --all",
+    "cache:prune:moderated": "node --experimental-strip-types scripts/prune-cache.ts --moderated-only",
+    "cache:prune:gc": "node --experimental-strip-types scripts/prune-cache.ts --gc",
+    "cache:prune:dry": "node --experimental-strip-types scripts/prune-cache.ts --dry-run",
+    "cache:prune:local:all": "node --experimental-strip-types scripts/prune-cache.ts --local --all",
+    "cache:prune:local:moderated": "node --experimental-strip-types scripts/prune-cache.ts --local --moderated-only",
+    "cache:prune:local:gc": "node --experimental-strip-types scripts/prune-cache.ts --local --gc",
+    "cache:prune:local:dry": "node --experimental-strip-types scripts/prune-cache.ts --local --dry-run",
+    "cache:prune:remote": "node --experimental-strip-types scripts/prune-cache.ts --remote",
+    "cache:prune:remote:all": "node --experimental-strip-types scripts/prune-cache.ts --remote --all",
+    "cache:prune:remote:moderated": "node --experimental-strip-types scripts/prune-cache.ts --remote --moderated-only",
+    "cache:prune:remote:gc": "node --experimental-strip-types scripts/prune-cache.ts --remote --gc",
+    "cache:prune:remote:dry": "node --experimental-strip-types scripts/prune-cache.ts --remote --dry-run",
+    "verify:live": "node --experimental-strip-types scripts/verify-relay.ts",
+    "gallery": "node --experimental-strip-types scripts/gallery-preview.ts"
   },
   "dependencies": {
     "@noble/curves": "^1.8.1",

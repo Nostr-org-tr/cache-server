@@ -47,6 +47,14 @@ All build, development, testing, and migration commands MUST be executed via the
 | `make version-set` | Sets an explicit version across all files (`make version-set VERSION=x.y.z`). |
 | `make db-migrate-local` | Applies SQL migrations against the local D1 emulator. |
 | `make db-migrate-remote` | Applies SQL migrations against the remote production Cloudflare D1 database. |
+| `make cache-prune-remote-all` | Clears all cached events and tags from remote production D1 (preserves operator rules by default). |
+| `make cache-prune-remote-moderated` | Scans remote D1 against operator rules and purges all moderated/NSFW content. |
+| `make cache-prune-remote-gc` | Executes GC routine (deletes expired/tombstoned events) on remote production D1. |
+| `make cache-prune-remote-dry-run` | Audits remote production D1 row counts without modifying or deleting anything. |
+| `make cache-prune-local-all` | Clears all cached events and tags from local D1 (preserves operator rules by default). |
+| `make cache-prune-local-moderated` | Scans local D1 against operator rules and purges all moderated/NSFW content. |
+| `make cache-prune-local-gc` | Executes GC routine on local D1 emulator. |
+| `make cache-prune-local-dry-run` | Audits local D1 emulator row counts without deleting anything. |
 | `make deploy` | Type-checks, runs tests, and deploys Worker & Durable Objects to Cloudflare. |
 
 ---

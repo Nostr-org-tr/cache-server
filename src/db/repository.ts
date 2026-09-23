@@ -6,6 +6,14 @@ import {
   MemoryLruCache,
   putMetadataToKv,
 } from '../cache';
+import {
+  createEmptyModerationRuleset,
+  extractModerationRulesFromEvents,
+  inspectEventModeration,
+  type ModerationRuleset,
+} from '../security';
+import { deleteEventVectors, executeSearch, indexEventsBatchVector } from '../search';
+import type { Env } from '../types/env';
 import type { NostrEvent, NostrFilter } from '../types/nostr';
 import {
   classifyEventKind,
@@ -167,6 +175,12 @@ export function splitFilterForSafeQuery(
  * Saves a single Nostr event into Cloudflare D1 adhering to NIP-01, NIP-09, NIP-16, and NIP-33 semantics.
  */
 export async function saveEvent(db: D1Database, event: NostrEvent): Promise<SaveResult> {
+  // Moderation check: drop NSFW, content-warning, and prohibited content
+  const moderation = inspectEventModeration(event);
+  if (!moderation.allowed) {
+    return { action: 'ignored', id: event.id, reason: 'moderated_sensitive_or_blocked' };
+  }
+
   const category = classifyEventKind(event.kind);
 
   // 1. Ephemeral events (kinds 20000..29999) must NEVER be saved to D1
@@ -479,6 +493,13 @@ export async function saveEventsBatch(
   const metadataToWarmInKv: NostrEvent[] = [];
 
   for (const event of events) {
+    // Moderation check: drop NSFW, content-warning, and prohibited content
+    const moderation = inspectEventModeration(event);
+    if (!moderation.allowed) {
+      results.push({ action: 'ignored', id: event.id, reason: 'moderated_sensitive_or_blocked' });
+      continue;
+    }
+
     const category = classifyEventKind(event.kind);
 
     // 1. Ephemeral: ignore
@@ -927,3 +948,171 @@ export async function countEvents(
 
   return totalCount;
 }
+
+/**
+ * Executes a search query (NIP-50 or Vector Search) returning NostrEvents ranked in descending similarity score order.
+ */
+export async function querySearchEvents(
+  db: D1Database,
+  env: Env,
+  filter: NostrFilter,
+  options?: EventFilterQueryOptions
+): Promise<NostrEvent[]> {
+  const limit = options?.maxLimit ?? 50;
+  const searchResults = await executeSearch(db, env, filter, limit);
+  return searchResults.map((r) => r.event);
+}
+
+/**
+ * Scans D1 for any unindexed events and generates/upserts vector embeddings into Vectorize.
+ * Called by scheduled cron jobs to reconcile vector store.
+ */
+export async function backfillUnindexedVectors(
+  db: D1Database,
+  env: Env,
+  batchLimit = 150
+): Promise<number> {
+  if (!env.AI || !env.VECTOR_INDEX || env.VECTOR_SEARCH_ENABLED === 'false') {
+    return 0;
+  }
+
+  // Find unindexed events (Kinds 0, 1, 30023, 9802)
+  const rows = await db
+    .prepare(
+      'SELECT id, pubkey, created_at, kind, d_tag, raw_event, created_at_recorded FROM events WHERE (vector_indexed = 0 OR vector_indexed IS NULL) AND kind IN (0, 1, 30023, 9802) ORDER BY created_at DESC LIMIT ?'
+    )
+    .bind(batchLimit)
+    .all<EventRow>();
+
+  if (!rows.results || rows.results.length === 0) {
+    return 0;
+  }
+
+  const events: NostrEvent[] = [];
+  for (const row of rows.results) {
+    events.push(rowToNostrEvent(row));
+  }
+
+  const indexedCount = await indexEventsBatchVector(
+    env.AI,
+    env.VECTOR_INDEX,
+    events,
+    env.VECTOR_EMBEDDING_MODEL
+  );
+
+  if (events.length > 0) {
+    const placeholders = events.map(() => '?').join(', ');
+    const eventIds = events.map((e) => e.id);
+    await db
+      .prepare(`UPDATE events SET vector_indexed = 1 WHERE id IN (${placeholders})`)
+      .bind(...eventIds)
+      .run();
+  }
+
+  return indexedCount;
+}
+
+/**
+ * Loads operator moderation rules from D1 (NIP-51 kind 10000 and NIP-56 kind 1984).
+ */
+export async function loadOperatorModerationRules(
+  db: D1Database,
+  operatorPubkey: string
+): Promise<ModerationRuleset> {
+  const normPubkey = operatorPubkey.trim().toLowerCase();
+  if (!normPubkey) {
+    return createEmptyModerationRuleset();
+  }
+
+  const rows = await db
+    .prepare(
+      'SELECT raw_event FROM events WHERE pubkey = ? AND kind IN (?, ?) ORDER BY created_at DESC LIMIT 50'
+    )
+    .bind(normPubkey, 10000, 1984)
+    .all<{ raw_event: string }>();
+
+  if (!rows.results || rows.results.length === 0) {
+    return createEmptyModerationRuleset();
+  }
+
+  const events: NostrEvent[] = [];
+  for (const r of rows.results) {
+    try {
+      const parsed = JSON.parse(r.raw_event) as NostrEvent;
+      events.push(parsed);
+    } catch {
+      // Ignore malformed raw events
+    }
+  }
+
+  return extractModerationRulesFromEvents(events, normPubkey);
+}
+
+/**
+ * Retroactively purges all events matching operator moderation rules from D1, KV, and Vectorize.
+ */
+export async function purgeModeratedEntities(
+  db: D1Database,
+  kv: KVNamespace | undefined,
+  vectorIndex: VectorizeIndex | undefined,
+  ruleset: ModerationRuleset
+): Promise<{ purgedCount: number }> {
+  let purgedCount = 0;
+  const eventIdsToPurge = new Set<string>(ruleset.blockedEventIds);
+
+  // 1. Find all event IDs authored by blocked pubkeys
+  if (ruleset.blockedPubkeys.size > 0) {
+    const pubkeys = Array.from(ruleset.blockedPubkeys);
+    for (let i = 0; i < pubkeys.length; i += MAX_SQL_PARAM_ARRAY_SIZE) {
+      const chunk = pubkeys.slice(i, i + MAX_SQL_PARAM_ARRAY_SIZE);
+      const placeholders = chunk.map(() => '?').join(', ');
+      const rows = await db
+        .prepare(`SELECT id FROM events WHERE pubkey IN (${placeholders})`)
+        .bind(...chunk)
+        .all<{ id: string }>();
+
+      if (rows.results && Array.isArray(rows.results)) {
+        for (const row of rows.results) {
+          eventIdsToPurge.add(row.id);
+        }
+      }
+    }
+  }
+
+  if (eventIdsToPurge.size === 0) {
+    return { purgedCount: 0 };
+  }
+
+  const allIds = Array.from(eventIdsToPurge);
+  for (let i = 0; i < allIds.length; i += MAX_SQL_PARAM_ARRAY_SIZE) {
+    const chunk = allIds.slice(i, i + MAX_SQL_PARAM_ARRAY_SIZE);
+    const placeholders = chunk.map(() => '?').join(', ');
+
+    const deleteTagsStmt = db
+      .prepare(`DELETE FROM event_tags WHERE event_id IN (${placeholders})`)
+      .bind(...chunk);
+    const deleteEventsStmt = db
+      .prepare(`DELETE FROM events WHERE id IN (${placeholders})`)
+      .bind(...chunk);
+
+    await executeBatchSafe(db, [deleteTagsStmt, deleteEventsStmt]);
+    purgedCount += chunk.length;
+
+    // Invalidate L0 in-memory cache and L1 KV cache
+    for (const id of chunk) {
+      invalidateEventInMemory(id);
+      if (kv) {
+        void deleteEventFromKv(kv, id).catch(() => {});
+      }
+    }
+  }
+
+  // Delete from Vectorize index if provisioned
+  if (vectorIndex && allIds.length > 0) {
+    await deleteEventVectors(vectorIndex, allIds);
+  }
+
+  return { purgedCount };
+}
+
+

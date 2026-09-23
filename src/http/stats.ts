@@ -52,6 +52,15 @@ export interface KvStats {
   error?: string;
 }
 
+export interface VectorStats {
+  status: 'active' | 'disabled' | 'unconfigured';
+  indexed_vectors_count: number;
+  total_indexable_events: number;
+  embedding_model: string;
+  dimensions: number;
+  metric: string;
+}
+
 export interface RelayStatsResponse {
   timestamp: number;
   service: string;
@@ -68,6 +77,7 @@ export interface RelayStatsResponse {
     client_distribution: ClientDistribution[];
   };
   kv: KvStats;
+  vector_search: VectorStats;
   relay: {
     name: string;
     description: string;
@@ -367,6 +377,44 @@ export async function handleStatsRequest(env: Env): Promise<Response> {
     const kvBinding = env.ENABLE_KV_CACHE === 'false' ? undefined : env.CACHE_KV;
     const kvStats = await collectKvStats(kvBinding);
 
+    // 6.1 Collect Vector Search Telemetry
+    let indexedVectorsCount = 0;
+    try {
+      const vResult = await env.DB.prepare(
+        'SELECT COUNT(*) AS total FROM events WHERE vector_indexed = 1'
+      ).first<{ total: number }>();
+      indexedVectorsCount = vResult?.total ?? 0;
+    } catch {
+      // Non-fatal if column not yet queried
+    }
+
+    let totalIndexableEvents = 0;
+    try {
+      const idxResult = await env.DB.prepare(
+        'SELECT COUNT(*) AS total FROM events WHERE kind IN (0, 1, 30023, 9802)'
+      ).first<{ total: number }>();
+      totalIndexableEvents = idxResult?.total ?? 0;
+    } catch {
+      // Non-fatal
+    }
+
+    const vectorEnabled = env.VECTOR_SEARCH_ENABLED !== 'false';
+    const vectorStatus: 'active' | 'disabled' | 'unconfigured' =
+      !env.VECTOR_INDEX || !env.AI
+        ? 'unconfigured'
+        : vectorEnabled
+          ? 'active'
+          : 'disabled';
+
+    const vectorStats: VectorStats = {
+      status: vectorStatus,
+      indexed_vectors_count: indexedVectorsCount,
+      total_indexable_events: totalIndexableEvents,
+      embedding_model: env.VECTOR_EMBEDDING_MODEL || '@cf/baai/bge-m3',
+      dimensions: 1024,
+      metric: 'cosine',
+    };
+
     // 7. Parse configured upstreams
     const upstreamRelays = env.UPSTREAM_RELAYS
       ? env.UPSTREAM_RELAYS.split(',').map((u) => u.trim()).filter(Boolean)
@@ -404,6 +452,7 @@ export async function handleStatsRequest(env: Env): Promise<Response> {
         client_distribution: clientDistribution,
       },
       kv: kvStats,
+      vector_search: vectorStats,
       relay: {
         name: env.RELAY_NAME || APP_NAME,
         description: env.RELAY_DESCRIPTION || 'High-Performance Regional Edge-Caching Nostr Relay',

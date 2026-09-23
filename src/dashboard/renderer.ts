@@ -695,6 +695,11 @@ export function renderDashboardHtml(data: DashboardData): string {
     <span class="card-sub">in cache</span>
   </div>
   <div class="card">
+    <span class="card-label">Searchable Vectors</span>
+    <span class="card-value" style="color:var(--accent2,#06b6d4)">${fmtNum(summary.indexed_vectors)}</span>
+    <span class="card-sub">1024-dim AI</span>
+  </div>
+  <div class="card">
     <span class="card-label">Unique Authors</span>
     <span class="card-value">${fmtNum(summary.total_authors)}</span>
     <span class="card-sub">distinct pubkeys</span>

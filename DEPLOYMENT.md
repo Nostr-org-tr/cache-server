@@ -23,6 +23,9 @@
 | :--- | :--- | :--- | :--- |
 | **D1 Database** | `DB` | `nostr_cache_db` (`6009d0a9-1d83-4c6b-a741-f6f4326e8102`) | Primary SQLite storage for events and tags index. |
 | **Durable Object** | `CLIENT_SESSION` | `ClientSession` (`new_sqlite_classes`) | Manages stateful client WebSocket sessions & upstream proxying. |
+| **Vectorize Index** | `VECTOR_INDEX` | `nostr-events-vector` | 1024-dim cosine similarity vector database for NIP-50 search. |
+| **Workers AI** | `AI` | `AI` | Neural embedding generation via `@cf/baai/bge-m3`. |
+| **KV Namespace** | `CACHE_KV` | `88a2dbeb312a439ea92a7f0a40e2e26c` | Multi-tier L1 cache for hot metadata. |
 | **Custom Domain** | N/A | `cache.nostr.org.tr` | Anycast edge routing + automated TLS certificate. |
 
 ---
@@ -35,24 +38,30 @@ Ensure you are using the correct Node.js runtime and dependencies:
 make install
 ```
 
-### Step 3.2: Remote D1 Database Migrations
-Apply the initial schema (`migrations/0001_initial_schema.sql`) to the remote production D1 database:
+### Step 3.2: Create Vectorize Index (One-Time Setup)
+Create the Vectorize index with 1024 dimensions (matching `@cf/baai/bge-m3`) and cosine similarity:
+```bash
+npx wrangler vectorize create nostr-events-vector --dimensions=1024 --metric=cosine
+```
+
+### Step 3.3: Remote D1 Database Migrations
+Apply the migrations (including `migrations/0003_vector_indexing.sql`) to the remote production D1 database:
 ```bash
 make db-migrate-remote
 ```
 
-### Step 3.3: Typecheck & Full Test Suite Execution
-Before deploying, ensure all linting, typechecking, and unit/integration/benchmark tests pass:
+### Step 3.4: Typecheck & Full Test Suite Execution
+Before deploying, ensure all linting, typechecking, and tests pass:
 ```bash
 make all
 ```
 
-### Step 3.4: Deploy Worker & Durable Objects
+### Step 3.5: Deploy Worker & Durable Objects
 Deploy the bundle to Cloudflare's global edge network:
 ```bash
 make deploy
 ```
-*Note: Wrangler will automatically configure the `cache.nostr.org.tr` custom domain route and apply the `v1` `new_sqlite_classes` migration for `ClientSession`.*
+*Note: Wrangler will automatically configure the `cache.nostr.org.tr` custom domain route, Vectorize & AI bindings, and Durable Objects.*
 
 ---
 

@@ -1,7 +1,16 @@
 import { DurableObject } from 'cloudflare:workers';
 import { putMetadataToKv } from '../cache';
 import { verifyEventCrypto } from '../crypto';
-import { countEvents, queryEventsHybrid, saveEvent, saveEventsBatch } from '../db';
+import {
+  countEvents,
+  loadOperatorModerationRules,
+  purgeModeratedEntities,
+  queryEventsHybrid,
+  querySearchEvents,
+  saveEvent,
+  saveEventsBatch,
+} from '../db';
+import { indexEventsBatchVector, indexEventVector } from '../search';
 import {
   formatClosedMessage,
   formatCountMessage,
@@ -12,7 +21,14 @@ import {
   matchFilters,
   parseClientMessage,
 } from '../protocol';
-import { RATE_LIMIT_DEFAULTS, SlidingWindowLimiter } from '../security';
+import {
+  createEmptyModerationRuleset,
+  extractModerationRulesFromEvents,
+  inspectEventModeration,
+  type ModerationRuleset,
+  RATE_LIMIT_DEFAULTS,
+  SlidingWindowLimiter,
+} from '../security';
 import type { Env } from '../types/env';
 import type { NostrEvent, NostrFilter } from '../types/nostr';
 import {
@@ -42,11 +58,14 @@ export class ClientSession extends DurableObject<Env> {
   private sessionMessageLimiter: SlidingWindowLimiter;
   private pubkeyWriteLimiter: SlidingWindowLimiter;
   private clientIp = '127.0.0.1';
+  private moderationRuleset: ModerationRuleset;
+  private moderationLoaded = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.subscriptions = new Map<string, NostrFilter[]>();
     this.sentEventIds = new Map<string, Set<string>>();
+    this.moderationRuleset = createEmptyModerationRuleset();
 
     const sessionMsgLimit = env.RATE_LIMIT_MSG_PER_WINDOW
       ? Number.parseInt(env.RATE_LIMIT_MSG_PER_WINDOW, 10)
@@ -75,6 +94,41 @@ export class ClientSession extends DurableObject<Env> {
       defaultRelays,
       defaultTimeoutMs,
     });
+  }
+
+  /**
+   * Lazily loads operator moderation rules (kind 10000 and 1984) from D1.
+   */
+  private async ensureModerationLoaded(): Promise<void> {
+    if (this.moderationLoaded) {
+      return;
+    }
+    if (this.env.RELAY_PUBKEY) {
+      try {
+        this.moderationRuleset = await loadOperatorModerationRules(
+          this.env.DB,
+          this.env.RELAY_PUBKEY
+        );
+      } catch (err) {
+        console.error('Failed to load operator moderation rules:', err);
+      }
+    }
+    this.moderationLoaded = true;
+  }
+
+  /**
+   * Sets or overrides active moderation ruleset (primarily for testing and simulation).
+   */
+  public setModerationRuleset(ruleset: ModerationRuleset): void {
+    this.moderationRuleset = ruleset;
+    this.moderationLoaded = true;
+  }
+
+  /**
+   * Returns active moderation ruleset.
+   */
+  public getModerationRuleset(): ModerationRuleset {
+    return this.moderationRuleset;
   }
 
   /**
@@ -154,6 +208,9 @@ export class ClientSession extends DurableObject<Env> {
    * WebSocket message handler invoked via Cloudflare Hibernation API.
    */
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    // 0. Ensure operator moderation rules are loaded
+    await this.ensureModerationLoaded();
+
     // 1. Enforce per-session message throughput rate limit
     const sessionRateResult = this.sessionMessageLimiter.check('msg');
     if (!sessionRateResult.allowed) {
@@ -209,15 +266,37 @@ export class ClientSession extends DurableObject<Env> {
 
         const kv = this.env.ENABLE_KV_CACHE === 'false' ? undefined : this.env.CACHE_KV;
 
-        // 1. Query L0 Memory / L1 KV cache and local D1 for matching events
-        const storedEvents = await queryEventsHybrid(
-          this.env.DB,
-          kv,
-          filters,
-          {
-            maxLimit: MAX_QUERY_LIMIT,
-          }
-        );
+        // 1. Check for NIP-50 search filters vs standard subscription filters
+        const searchFilters = filters.filter((f) => Boolean(f.search && f.search.trim().length > 0));
+        const standardFilters = filters.filter((f) => !f.search || f.search.trim().length === 0);
+
+        const storedEvents: NostrEvent[] = [];
+
+        // 1a. Query NIP-50 Vector Search Engine (preserves similarity score descending order)
+        for (const sFilter of searchFilters) {
+          const searchResults = await querySearchEvents(
+            this.env.DB,
+            this.env,
+            sFilter,
+            {
+              maxLimit: MAX_QUERY_LIMIT,
+            }
+          );
+          storedEvents.push(...searchResults);
+        }
+
+        // 1b. Query standard filters via multi-tier L0/L1/D1 hybrid resolver
+        if (standardFilters.length > 0) {
+          const standardResults = await queryEventsHybrid(
+            this.env.DB,
+            kv,
+            standardFilters,
+            {
+              maxLimit: MAX_QUERY_LIMIT,
+            }
+          );
+          storedEvents.push(...standardResults);
+        }
 
         // 2. Stream matching cached events to client with deduplication
         for (const event of storedEvents) {
@@ -264,6 +343,10 @@ export class ClientSession extends DurableObject<Env> {
             relayUrls: targetRelays,
           },
           (event: NostrEvent) => {
+            const modResult = inspectEventModeration(event, this.moderationRuleset);
+            if (!modResult.allowed) {
+              return;
+            }
             if (!sentSet.has(event.id)) {
               ws.send(formatEventMessage(subId, event));
               sentSet.add(event.id);
@@ -274,13 +357,25 @@ export class ClientSession extends DurableObject<Env> {
         // 5. Emit EOSE to client once all upstream relays complete or time out
         ws.send(formatEoseMessage(subId));
 
-        // 6. Asynchronously persist newly pulled non-ephemeral events into D1 and L0 memory / L1 KV
+        // 6. Asynchronously persist newly pulled non-ephemeral, non-moderated events into D1 and L0 memory / L1 KV, plus background vector indexing
         if (pullResult.events.length > 0) {
           const nonEphemeral = pullResult.events.filter(
-            (e) => !(e.kind >= 20000 && e.kind < 30000)
+            (e) =>
+              !(e.kind >= 20000 && e.kind < 30000) &&
+              inspectEventModeration(e, this.moderationRuleset).allowed
           );
           if (nonEphemeral.length > 0) {
             await saveEventsBatch(this.env.DB, nonEphemeral, kv);
+
+            // Non-blocking background vector indexing
+            if (this.env.AI && this.env.VECTOR_INDEX && this.env.VECTOR_SEARCH_ENABLED !== 'false') {
+              void indexEventsBatchVector(
+                this.env.AI,
+                this.env.VECTOR_INDEX,
+                nonEphemeral,
+                this.env.VECTOR_EMBEDDING_MODEL
+              ).catch((err) => console.error('Background vector batch indexing error:', err));
+            }
           }
         }
 
@@ -328,6 +423,52 @@ export class ClientSession extends DurableObject<Env> {
           return;
         }
 
+        // 4. If operator publishes kind 10000 (mute list) or kind 1984 (report), hot-reload moderation rules and trigger retroactive purge
+        if (isOperator && (event.kind === 10000 || event.kind === 1984)) {
+          const updatedRules = extractModerationRulesFromEvents([event], event.pubkey);
+          this.moderationRuleset = {
+            blockedPubkeys: new Set([
+              ...this.moderationRuleset.blockedPubkeys,
+              ...updatedRules.blockedPubkeys,
+            ]),
+            blockedEventIds: new Set([
+              ...this.moderationRuleset.blockedEventIds,
+              ...updatedRules.blockedEventIds,
+            ]),
+            bannedWordsAndDomains: Array.from(
+              new Set([
+                ...this.moderationRuleset.bannedWordsAndDomains,
+                ...updatedRules.bannedWordsAndDomains,
+              ])
+            ),
+            bannedHashtags: new Set([
+              ...this.moderationRuleset.bannedHashtags,
+              ...updatedRules.bannedHashtags,
+            ]),
+          };
+
+          const kv = this.env.ENABLE_KV_CACHE === 'false' ? undefined : this.env.CACHE_KV;
+          void purgeModeratedEntities(
+            this.env.DB,
+            kv,
+            this.env.VECTOR_INDEX,
+            this.moderationRuleset
+          ).catch((err) => console.error('Background moderation purge error:', err));
+        }
+
+        // 5. Enforce strict moderation policies (NIP-36, NIP-32, Operator Rules)
+        const modResult = inspectEventModeration(event, this.moderationRuleset);
+        if (!modResult.allowed) {
+          ws.send(
+            formatOkMessage(
+              event.id,
+              false,
+              modResult.reason || 'blocked: content policy violation'
+            )
+          );
+          return;
+        }
+
         const isEphemeral = event.kind >= 20000 && event.kind < 30000;
 
         if (!isEphemeral) {
@@ -336,6 +477,16 @@ export class ClientSession extends DurableObject<Env> {
           await saveEvent(this.env.DB, event);
           if (kv) {
             void putMetadataToKv(kv, event);
+          }
+
+          // Non-blocking background vector indexing
+          if (this.env.AI && this.env.VECTOR_INDEX && this.env.VECTOR_SEARCH_ENABLED !== 'false') {
+            void indexEventVector(
+              this.env.AI,
+              this.env.VECTOR_INDEX,
+              event,
+              this.env.VECTOR_EMBEDDING_MODEL
+            ).catch((err) => console.error('Background vector indexing error:', err));
           }
         }
 

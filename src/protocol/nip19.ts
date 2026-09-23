@@ -229,6 +229,50 @@ export function decodeNpub(npub: string): string {
 }
 
 /**
+ * Encodes a 32-byte (64-character) hex Nostr event ID into a NIP-19 `note1...` string.
+ */
+export function encodeNote(eventIdHexOrNote: string): string {
+  if (typeof eventIdHexOrNote !== 'string') {
+    throw new Error('Event ID must be a string');
+  }
+
+  const trimmed = eventIdHexOrNote.trim();
+  if (trimmed.toLowerCase().startsWith('note1')) {
+    const decoded = decodeNote(trimmed);
+    if (decoded.length === 64) {
+      return trimmed.toLowerCase();
+    }
+  }
+
+  if (!HEX_REGEX.test(trimmed)) {
+    throw new Error(`Invalid hex event ID: "${trimmed}" (must be 64-character hex string)`);
+  }
+
+  const bytes = hexToBytes(trimmed);
+  return encodeBech32('note', bytes);
+}
+
+/**
+ * Decodes a NIP-19 `note1...` string into a 32-byte (64-character) lowercase hex event ID.
+ */
+export function decodeNote(note: string): string {
+  if (typeof note !== 'string') {
+    throw new Error('note must be a string');
+  }
+
+  const { hrp, data } = decodeBech32(note.trim());
+  if (hrp !== 'note') {
+    throw new Error(`Invalid HRP: expected "note", got "${hrp}"`);
+  }
+
+  if (data.length !== 32) {
+    throw new Error(`Invalid note payload length: expected 32 bytes, got ${data.length}`);
+  }
+
+  return bytesToHex(data);
+}
+
+/**
  * Formats a public key (hex or npub) into a shortened human-readable npub representation.
  * Example: `npub182341…e479a5`
  *

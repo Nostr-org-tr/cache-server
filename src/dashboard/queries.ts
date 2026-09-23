@@ -60,13 +60,15 @@ export async function querySummary(db: D1Database): Promise<DashboardSummary> {
       db.prepare('SELECT COUNT(*) AS total FROM events'),
       db.prepare('SELECT COUNT(DISTINCT pubkey) AS total FROM events'),
       db.prepare('SELECT COUNT(*) AS total FROM event_tags'),
+      db.prepare('SELECT COUNT(*) AS total FROM events WHERE vector_indexed = 1'),
       db.prepare('SELECT MIN(created_at) AS oldest, MAX(created_at) AS newest FROM events'),
     ]);
 
     const events = batchResults[0]?.results?.[0] as { total: number } | undefined;
     const authors = batchResults[1]?.results?.[0] as { total: number } | undefined;
     const tags = batchResults[2]?.results?.[0] as { total: number } | undefined;
-    const range = batchResults[3]?.results?.[0] as
+    const vectors = batchResults[3]?.results?.[0] as { total: number } | undefined;
+    const range = batchResults[4]?.results?.[0] as
       | { oldest: number | null; newest: number | null }
       | undefined;
 
@@ -74,6 +76,7 @@ export async function querySummary(db: D1Database): Promise<DashboardSummary> {
       total_events: events?.total ?? 0,
       total_authors: authors?.total ?? 0,
       total_tags: tags?.total ?? 0,
+      indexed_vectors: vectors?.total ?? 0,
       oldest_event_at: range?.oldest ?? null,
       newest_event_at: range?.newest ?? null,
     };
@@ -82,6 +85,7 @@ export async function querySummary(db: D1Database): Promise<DashboardSummary> {
       total_events: 0,
       total_authors: 0,
       total_tags: 0,
+      indexed_vectors: 0,
       oldest_event_at: null,
       newest_event_at: null,
     };

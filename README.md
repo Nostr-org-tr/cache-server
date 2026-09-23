@@ -128,6 +128,12 @@ make all                 # Execute lint, test, and build in sequence
 make db-create           # Create the Cloudflare D1 database via Wrangler
 make db-migrate-local    # Apply SQL migrations to local SQLite environment
 make db-migrate-remote   # Apply SQL migrations to remote production Cloudflare D1
+make cache-prune-remote-all       # Flush remote production cache (preserves operator rules)
+make cache-prune-remote-moderated # Sweep & purge NSFW/muted events from remote D1
+make cache-prune-remote-gc        # Run TTL garbage collection on remote D1
+make cache-prune-remote-dry-run   # Audit remote production D1 row counts
+make cache-prune-local-all        # Flush local development cache
+make cache-prune-local-moderated  # Purge NSFW/muted events from local D1
 make version-check       # Verify SemVer sync across package.json and src/version.ts
 make version-patch       # Bump patch version (1.2.0 -> 1.2.1) across all files
 make version-minor       # Bump minor version (1.2.0 -> 1.3.0) across all files

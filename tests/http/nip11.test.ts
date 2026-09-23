@@ -20,7 +20,7 @@ describe('NIP-11 Relay Information Document', () => {
     );
     expect(doc.pubkey).toBe('');
     expect(doc.contact).toBe('admin@nostr.org.tr');
-    expect(doc.supported_nips).toEqual([1, 9, 11, 16, 20, 33]);
+    expect(doc.supported_nips).toEqual([1, 9, 11, 16, 20, 33, 50]);
     expect(doc.software).toBe(APP_REPOSITORY);
     expect(doc.version).toBe(APP_VERSION);
     expect(doc.limitation).toBeDefined();

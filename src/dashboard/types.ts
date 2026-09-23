@@ -74,6 +74,7 @@ export interface DashboardSummary {
   readonly total_events: number;
   readonly total_authors: number;
   readonly total_tags: number;
+  readonly indexed_vectors: number;
   readonly oldest_event_at: number | null;
   readonly newest_event_at: number | null;
 }

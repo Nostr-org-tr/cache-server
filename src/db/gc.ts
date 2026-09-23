@@ -1,3 +1,15 @@
+import { deleteEventVectors } from '../search';
+import { inspectEventModeration, type ModerationRuleset } from '../security';
+import { rowToNostrEvent } from './classifier';
+import {
+  executeBatchSafe,
+  loadOperatorModerationRules,
+  MAX_SQL_PARAM_ARRAY_SIZE,
+  memoryEventIdCache,
+  memoryReplaceableCache,
+} from './repository';
+import type { EventRow } from './types';
+
 /**
  * Rolling Expiration Garbage Collection Engine
  * 
@@ -26,6 +38,25 @@ export interface GCOptions {
   readonly maxBatchesPerTier?: number;
   readonly customTiers?: readonly GCTierConfig[];
   readonly nowSeconds?: number;
+}
+
+export interface PruneAllOptions {
+  readonly preserveOperator?: boolean;
+  readonly operatorPubkey?: string;
+  readonly batchSize?: number;
+}
+
+export interface PruneAllResult {
+  readonly purgedEvents: number;
+  readonly purgedTags: number;
+  readonly durationMs: number;
+  readonly preservedOperatorEvents: number;
+}
+
+export interface ModerationScanResult {
+  readonly scannedCount: number;
+  readonly purgedCount: number;
+  readonly durationMs: number;
 }
 
 /**
@@ -189,3 +220,164 @@ export async function runGarbageCollection(
     timestamp: nowSeconds,
   };
 }
+
+/**
+ * Completely purges all cached events from D1, KV, Vectorize, and in-memory caches.
+ * When `preserveOperator: true` (default when operatorPubkey is provided), events authored by `operatorPubkey` are retained.
+ */
+export async function pruneEntireCache(
+  db: D1Database,
+  _kv?: KVNamespace,
+  vectorIndex?: VectorizeIndex,
+  options?: PruneAllOptions
+): Promise<PruneAllResult> {
+  const startTime = Date.now();
+  const preserveOperator = options?.preserveOperator ?? Boolean(options?.operatorPubkey);
+  const operatorPubkey = options?.operatorPubkey?.trim().toLowerCase();
+  const batchSize = options?.batchSize ?? 500;
+
+  let purgedEvents = 0;
+  let purgedTags = 0;
+  let preservedOperatorEvents = 0;
+
+  if (preserveOperator && operatorPubkey) {
+    // Count preserved operator events
+    const countRow = await db
+      .prepare('SELECT COUNT(*) AS count FROM events WHERE LOWER(pubkey) = ?')
+      .bind(operatorPubkey)
+      .first<{ count: number }>();
+    preservedOperatorEvents = countRow?.count ?? 0;
+
+    // Iteratively delete all non-operator events in batches
+    while (true) {
+      const rows = await db
+        .prepare('SELECT id FROM events WHERE LOWER(pubkey) != ? LIMIT ?')
+        .bind(operatorPubkey, batchSize)
+        .all<{ id: string }>();
+
+      if (!rows.results || rows.results.length === 0) {
+        break;
+      }
+
+      const ids = rows.results.map((r) => r.id);
+      for (let i = 0; i < ids.length; i += MAX_SQL_PARAM_ARRAY_SIZE) {
+        const chunk = ids.slice(i, i + MAX_SQL_PARAM_ARRAY_SIZE);
+        const placeholders = chunk.map(() => '?').join(', ');
+
+        const delTags = db.prepare(`DELETE FROM event_tags WHERE event_id IN (${placeholders})`).bind(...chunk);
+        const delEvents = db.prepare(`DELETE FROM events WHERE id IN (${placeholders})`).bind(...chunk);
+
+        await executeBatchSafe(db, [delTags, delEvents]);
+        purgedEvents += chunk.length;
+      }
+
+      // Delete from Vectorize
+      if (vectorIndex) {
+        await deleteEventVectors(vectorIndex, ids);
+      }
+    }
+  } else {
+    // Full blank-slate wipe
+    const countTagsRow = await db.prepare('SELECT COUNT(*) AS count FROM event_tags').first<{ count: number }>();
+    const countEventsRow = await db.prepare('SELECT COUNT(*) AS count FROM events').first<{ count: number }>();
+    purgedTags = countTagsRow?.count ?? 0;
+    purgedEvents = countEventsRow?.count ?? 0;
+
+    await executeBatchSafe(db, [
+      db.prepare('DELETE FROM event_tags'),
+      db.prepare('DELETE FROM events'),
+    ]);
+  }
+
+  // Clear L0 in-memory caches
+  memoryEventIdCache.clear();
+  memoryReplaceableCache.clear();
+
+  const durationMs = Date.now() - startTime;
+
+  return {
+    purgedEvents,
+    purgedTags,
+    durationMs,
+    preservedOperatorEvents,
+  };
+}
+
+/**
+ * Scans all existing D1 events and retroactively removes any violating NIP-36, NIP-32, or operator moderation rules.
+ */
+export async function scanAndPurgeModeratedEvents(
+  db: D1Database,
+  _kv?: KVNamespace,
+  vectorIndex?: VectorizeIndex,
+  operatorPubkey?: string,
+  options?: { batchSize?: number }
+): Promise<ModerationScanResult> {
+  const startTime = Date.now();
+  const batchSize = options?.batchSize ?? 250;
+
+  let ruleset: ModerationRuleset | undefined;
+  if (operatorPubkey) {
+    ruleset = await loadOperatorModerationRules(db, operatorPubkey);
+  }
+
+  let scannedCount = 0;
+  let purgedCount = 0;
+  let offset = 0;
+
+  while (true) {
+    const rows = await db
+      .prepare('SELECT id, pubkey, created_at, kind, d_tag, raw_event, created_at_recorded FROM events ORDER BY created_at DESC LIMIT ? OFFSET ?')
+      .bind(batchSize, offset)
+      .all<EventRow>();
+
+    if (!rows.results || rows.results.length === 0) {
+      break;
+    }
+
+    scannedCount += rows.results.length;
+    const idsToPurge: string[] = [];
+
+    for (const row of rows.results) {
+      try {
+        const event = rowToNostrEvent(row);
+        const moderation = inspectEventModeration(event, ruleset);
+        if (!moderation.allowed) {
+          idsToPurge.push(event.id);
+        }
+      } catch {
+        // Corrupt row, flag for purge
+        idsToPurge.push(row.id);
+      }
+    }
+
+    if (idsToPurge.length > 0) {
+      for (let i = 0; i < idsToPurge.length; i += MAX_SQL_PARAM_ARRAY_SIZE) {
+        const chunk = idsToPurge.slice(i, i + MAX_SQL_PARAM_ARRAY_SIZE);
+        const placeholders = chunk.map(() => '?').join(', ');
+
+        const delTags = db.prepare(`DELETE FROM event_tags WHERE event_id IN (${placeholders})`).bind(...chunk);
+        const delEvents = db.prepare(`DELETE FROM events WHERE id IN (${placeholders})`).bind(...chunk);
+
+        await executeBatchSafe(db, [delTags, delEvents]);
+        purgedCount += chunk.length;
+      }
+
+      if (vectorIndex) {
+        await deleteEventVectors(vectorIndex, idsToPurge);
+      }
+    }
+
+    // Advance offset by number of retained (non-deleted) rows in this page
+    offset += (rows.results.length - idsToPurge.length);
+  }
+
+  const durationMs = Date.now() - startTime;
+
+  return {
+    scannedCount,
+    purgedCount,
+    durationMs,
+  };
+}
+

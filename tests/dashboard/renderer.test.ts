@@ -15,6 +15,7 @@ const MINIMAL_DATA: DashboardData = {
     total_events: 42_000,
     total_authors: 1_234,
     total_tags: 120_000,
+    indexed_vectors: 12_500,
     oldest_event_at: FIXED_TS - 7 * 86400,
     newest_event_at: FIXED_TS - 60,
   },

@@ -114,6 +114,14 @@ describe('HTTP /stats Endpoint', () => {
     expect(json.kv.list_complete).toBe(true);
     expect(typeof json.kv.latency_ms).toBe('number');
 
+    // Vector Search Telemetry checks
+    expect(json.vector_search).toBeDefined();
+    expect(json.vector_search.embedding_model).toBe('@cf/baai/bge-m3');
+    expect(json.vector_search.dimensions).toBe(1024);
+    expect(json.vector_search.metric).toBe('cosine');
+    expect(typeof json.vector_search.indexed_vectors_count).toBe('number');
+    expect(typeof json.vector_search.total_indexable_events).toBe('number');
+
     // Relay checks
     expect(json.relay.name).toBe('Nostr Turkey Regional Cache');
     expect(json.relay.pubkey).toBe('46f3c7bb33cc3019049b76dc89dbb96e34c247bdda68b6ad8632682793ff8a1a');

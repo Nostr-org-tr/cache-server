@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_GC_TIERS,
+  pruneEntireCache,
   pruneTierBatch,
   runGarbageCollection,
+  scanAndPurgeModeratedEvents,
   type GCTierConfig,
 } from '../../src/db/gc';
 import { saveEvent } from '../../src/db/repository';
@@ -191,5 +193,109 @@ describe('Rolling Expiration Garbage Collection Engine', () => {
       expect(tier.name).toBeDefined();
       expect(tier.ttlSeconds).toBeGreaterThan(0);
     }
+  });
+
+  describe('pruneEntireCache()', () => {
+    it('purges all cache while preserving operator events when preserveOperator is true', async () => {
+      const db = new MockD1Database();
+
+      const operatorEvent = createMockEvent({
+        id: 'op1'.padEnd(64, '0'),
+        pubkey: MOCK_PUBKEY_1,
+        kind: 0,
+        content: JSON.stringify({ name: 'operator' }),
+      });
+      await saveEvent(db, operatorEvent);
+
+      const userEvent1 = createMockEvent({
+        id: 'user1'.padEnd(64, '0'),
+        pubkey: MOCK_PUBKEY_2,
+        kind: 1,
+        content: 'User feed note',
+      });
+      await saveEvent(db, userEvent1);
+
+      const userEvent2 = createMockEvent({
+        id: 'user2'.padEnd(64, '0'),
+        pubkey: MOCK_PUBKEY_2,
+        kind: 1,
+        content: 'User second note',
+      });
+      await saveEvent(db, userEvent2);
+
+      expect(db.events.size).toBe(3);
+
+      const result = await pruneEntireCache(db, undefined, undefined, {
+        preserveOperator: true,
+        operatorPubkey: MOCK_PUBKEY_1,
+      });
+
+      expect(result.purgedEvents).toBe(2);
+      expect(result.preservedOperatorEvents).toBe(1);
+      expect(db.events.has(operatorEvent.id)).toBe(true);
+      expect(db.events.has(userEvent1.id)).toBe(false);
+      expect(db.events.has(userEvent2.id)).toBe(false);
+    });
+
+    it('performs full blank-slate wipe when preserveOperator is false', async () => {
+      const db = new MockD1Database();
+
+      const ev1 = createMockEvent({ id: '11'.repeat(32), pubkey: MOCK_PUBKEY_1 });
+      const ev2 = createMockEvent({ id: '22'.repeat(32), pubkey: MOCK_PUBKEY_2 });
+      await saveEvent(db, ev1);
+      await saveEvent(db, ev2);
+
+      expect(db.events.size).toBe(2);
+
+      const result = await pruneEntireCache(db, undefined, undefined, {
+        preserveOperator: false,
+      });
+
+      expect(result.purgedEvents).toBe(2);
+      expect(db.events.size).toBe(0);
+      expect(db.eventTags.length).toBe(0);
+    });
+  });
+
+  describe('scanAndPurgeModeratedEvents()', () => {
+    it('retroactively removes existing sensitive and muted events from database', async () => {
+      const db = new MockD1Database();
+
+      const cleanEvent = createMockEvent({
+        id: 'clean'.padEnd(64, '0'),
+        pubkey: MOCK_PUBKEY_2,
+        kind: 1,
+        content: 'Clean post',
+        tags: [],
+      });
+      await saveEvent(db, cleanEvent);
+
+      // Force insert an older sensitive event with content-warning tag
+      const sensitiveEvent = createMockEvent({
+        id: 'sensitive'.padEnd(64, '0'),
+        pubkey: MOCK_PUBKEY_2,
+        kind: 1,
+        content: 'NSFW post',
+        tags: [['content-warning', 'nsfw']],
+      });
+      db.events.set(sensitiveEvent.id, {
+        id: sensitiveEvent.id,
+        pubkey: sensitiveEvent.pubkey,
+        created_at: sensitiveEvent.created_at,
+        kind: sensitiveEvent.kind,
+        d_tag: null,
+        raw_event: JSON.stringify(sensitiveEvent),
+        created_at_recorded: 1700000000,
+      });
+
+      expect(db.events.size).toBe(2);
+
+      const result = await scanAndPurgeModeratedEvents(db, undefined, undefined, MOCK_PUBKEY_1);
+
+      expect(result.scannedCount).toBe(2);
+      expect(result.purgedCount).toBe(1);
+      expect(db.events.has(cleanEvent.id)).toBe(true);
+      expect(db.events.has(sensitiveEvent.id)).toBe(false);
+    });
   });
 });

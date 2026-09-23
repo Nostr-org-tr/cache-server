@@ -26,6 +26,7 @@ export async function handleLandingRequest(
   let totalEvents: number | undefined;
   let totalAuthors: number | undefined;
   let totalTags: number | undefined;
+  let indexedVectors: number | undefined;
 
   // Attempt fast summary query from D1
   if (env.DB) {
@@ -34,6 +35,7 @@ export async function handleLandingRequest(
       totalEvents = summary.total_events;
       totalAuthors = summary.total_authors;
       totalTags = summary.total_tags;
+      indexedVectors = summary.indexed_vectors;
     } catch (err) {
       console.warn('[Landing] Failed to query live summary stats from D1:', err);
     }
@@ -54,12 +56,13 @@ export async function handleLandingRequest(
       totalEvents,
       totalAuthors,
       totalTags,
+      indexedVectors,
       upstreamCount: configuredUpstreams.length,
       kvStatus,
       gcSchedule: 'Daily at 03:00 UTC',
     },
     upstreams: configuredUpstreams,
-    supportedNips: [1, 9, 11, 16, 20, 33, 65],
+    supportedNips: [1, 9, 11, 16, 20, 33, 50, 65],
   });
 
   const headers = createCorsHeaders({

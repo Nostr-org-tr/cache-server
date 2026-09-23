@@ -19,4 +19,8 @@ export interface Env {
   ALLOW_DIRECT_WRITES?: string;
   READ_ONLY?: string;
   ENABLE_KV_CACHE?: string;
+  AI?: Ai;
+  VECTOR_INDEX?: VectorizeIndex;
+  VECTOR_SEARCH_ENABLED?: string;
+  VECTOR_EMBEDDING_MODEL?: string;
 }

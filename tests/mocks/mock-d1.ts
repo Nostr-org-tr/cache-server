@@ -104,6 +104,16 @@ export class MockD1PreparedStatement implements D1PreparedStatement {
       };
     }
 
+    // Query 0.15: SELECT COUNT(*) AS total FROM events WHERE vector_indexed = 1
+    if (q.includes('FROM events') && (q.includes('vector_indexed = 1') || q.includes('vector_indexed=1'))) {
+      const count = Array.from(this.db.events.values()).filter((e) => (e as any).vector_indexed === 1).length;
+      return {
+        results: [{ total: count } as unknown as T],
+        success: true,
+        meta: createMockMeta({ rows_read: this.db.events.size }),
+      };
+    }
+
     // Query 0.2: SELECT COUNT(*) AS total FROM events
     if (q.includes('FROM events') && (q.includes('COUNT(*) AS total') || q.includes('COUNT(*) as total'))) {
       return {
@@ -504,8 +514,15 @@ export class MockD1PreparedStatement implements D1PreparedStatement {
       return { results: [], success: true, meta: createMockMeta() };
     }
 
-    // Query 4: SELECT COUNT(*) as count FROM events ...
-    if (q.startsWith('SELECT COUNT(*) as count FROM events')) {
+    // Query 4: SELECT COUNT(*) as count FROM events / event_tags ...
+    if (q.toUpperCase().startsWith('SELECT COUNT(*)')) {
+      if (q.toUpperCase().includes('FROM EVENT_TAGS')) {
+        return {
+          results: [{ count: this.db.eventTags.length } as unknown as T],
+          success: true,
+          meta: createMockMeta({ rows_read: this.db.eventTags.length }),
+        };
+      }
       const rows = this.filterRows();
       return {
         results: [{ count: rows.length } as unknown as T],
@@ -533,8 +550,12 @@ export class MockD1PreparedStatement implements D1PreparedStatement {
       // Sort by created_at DESC
       rows.sort((a, b) => b.created_at - a.created_at);
 
-      // Check limit param (last parameter)
-      if (this.boundParams.length > 0) {
+      // Check LIMIT ? OFFSET ? vs LIMIT ?
+      if (q.includes('LIMIT ? OFFSET ?')) {
+        const limit = (this.boundParams[this.boundParams.length - 2] as number | undefined) ?? rows.length;
+        const offset = (this.boundParams[this.boundParams.length - 1] as number | undefined) ?? 0;
+        rows = rows.slice(offset, offset + limit);
+      } else if (this.boundParams.length > 0) {
         const lastParam = this.boundParams[this.boundParams.length - 1];
         if (typeof lastParam === 'number' && lastParam > 0) {
           rows = rows.slice(0, lastParam);
@@ -591,6 +612,23 @@ export class MockD1PreparedStatement implements D1PreparedStatement {
         this.db.eventTags.push({ event_id: eventId, tag_name: tagName, tag_value: tagValue });
       }
       return { results: [], success: true, meta: createMockMeta({ rows_written: 1, changes: 1 }) };
+    }
+
+    const qUpper = q.toUpperCase();
+
+    // DELETE FROM event_tags (full wipe)
+    if (qUpper === 'DELETE FROM EVENT_TAGS' || qUpper === 'DELETE FROM EVENT_TAGS;') {
+      const initialCount = this.db.eventTags.length;
+      this.db.eventTags = [];
+      return { results: [], success: true, meta: createMockMeta({ rows_written: initialCount, changes: initialCount }) };
+    }
+
+    // DELETE FROM events (full wipe)
+    if (qUpper === 'DELETE FROM EVENTS' || qUpper === 'DELETE FROM EVENTS;') {
+      const initialCount = this.db.events.size;
+      this.db.events.clear();
+      this.db.eventTags = [];
+      return { results: [], success: true, meta: createMockMeta({ rows_written: initialCount, changes: initialCount }) };
     }
 
     // DELETE FROM events WHERE id = ?
@@ -701,6 +739,15 @@ export class MockD1PreparedStatement implements D1PreparedStatement {
         paramIdx += count;
         rows = rows.filter((r) => pubkeys.includes(r.pubkey.toLowerCase()));
       }
+    }
+
+    // Check pubkey != ? or LOWER(pubkey) != ?
+    if (/(?:LOWER\(pubkey\)|pubkey)\s*!=\s*\?/i.test(q)) {
+      const notPub = (this.boundParams[paramIdx++] as string).toLowerCase();
+      rows = rows.filter((r) => r.pubkey.toLowerCase() !== notPub);
+    } else if (/(?:LOWER\(pubkey\)|pubkey)\s*=\s*\?/i.test(q)) {
+      const matchPub = (this.boundParams[paramIdx++] as string).toLowerCase();
+      rows = rows.filter((r) => r.pubkey.toLowerCase() === matchPub);
     }
 
     // Check pubkey LIKE ?

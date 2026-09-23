@@ -12,6 +12,7 @@ export interface LandingStatsSummary {
   totalEvents?: number | undefined;
   totalAuthors?: number | undefined;
   totalTags?: number | undefined;
+  indexedVectors?: number | undefined;
   upstreamCount?: number | undefined;
   kvStatus?: 'active' | 'disabled' | 'error' | undefined;
   gcSchedule?: string | undefined;
@@ -62,6 +63,7 @@ export function renderLandingHtml(options?: RenderLandingOptions): string {
   const totalEventsFormatted = fmtNum(stats?.totalEvents);
   const totalAuthorsFormatted = fmtNum(stats?.totalAuthors);
   const totalTagsFormatted = fmtNum(stats?.totalTags);
+  const totalVectorsFormatted = fmtNum(stats?.indexedVectors);
   const upstreamCount = stats?.upstreamCount ?? (options?.upstreams?.length || 4);
   const kvStatus = stats?.kvStatus || 'active';
 
@@ -237,6 +239,66 @@ export function renderLandingHtml(options?: RenderLandingOptions): string {
     </div>
   </section>
 
+  <!-- ── Vector Search Playground Section ── -->
+  <section id="search-section" class="py-12 bg-base-200/40 border-b border-base-300">
+    <div class="max-w-4xl mx-auto px-4 sm:px-6">
+      <div class="text-center mb-6">
+        <div class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-primary/10 text-primary font-semibold text-xs mb-2">
+          <span>🔍 NIP-50 Vector Search</span>
+        </div>
+        <h2 class="text-2xl sm:text-3xl font-bold tracking-tight">Explore the Nostr Knowledge Base</h2>
+        <p class="text-sm text-base-content/70 mt-1">Search notes, articles, and profiles with AI semantic embeddings</p>
+      </div>
+
+      <!-- Search Input Container -->
+      <div class="bg-base-100 border border-base-300 rounded-2xl shadow-sm p-4 mb-6">
+        <form id="landing-search-form" class="flex flex-col sm:flex-row gap-2">
+          <div class="relative flex-1">
+            <span class="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-base-content/50">
+              <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+              </svg>
+            </span>
+            <input 
+              type="text" 
+              id="landing-search-input" 
+              placeholder="Search notes, articles, or profiles (e.g. bitcoin lightning)..." 
+              class="input input-bordered w-full pl-10 pr-4 text-sm rounded-xl focus:border-primary"
+              autocomplete="off"
+            />
+          </div>
+          <button type="submit" id="landing-search-btn" class="btn btn-primary rounded-xl px-5 text-sm font-semibold gap-1.5 shrink-0">
+            <span>Search</span>
+            <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3" />
+            </svg>
+          </button>
+        </form>
+
+        <!-- Kinds Filter Pills -->
+        <div class="flex flex-wrap items-center gap-2 mt-3 pt-3 border-t border-base-200 text-xs">
+          <span class="font-medium text-base-content/60">Filter kinds:</span>
+          <button type="button" class="kind-pill btn btn-xs btn-primary rounded-lg" data-kinds="1,0,30023">All (Notes, Articles, Profiles)</button>
+          <button type="button" class="kind-pill btn btn-xs btn-outline btn-neutral rounded-lg" data-kinds="1">Notes (kind 1)</button>
+          <button type="button" class="kind-pill btn btn-xs btn-outline btn-neutral rounded-lg" data-kinds="30023">Articles (kind 30023)</button>
+          <button type="button" class="kind-pill btn btn-xs btn-outline btn-neutral rounded-lg" data-kinds="0">Profiles (kind 0)</button>
+        </div>
+      </div>
+
+      <!-- Live Search Results Container -->
+      <div id="search-results-wrapper" class="hidden">
+        <div class="flex items-center justify-between mb-3 px-1 text-xs text-base-content/70">
+          <span id="search-status-text">Found 0 results</span>
+          <span id="search-time-text" class="code-font text-primary font-medium"></span>
+        </div>
+        <div id="search-results-list" class="space-y-3">
+          <!-- Dynamic cards injected here -->
+        </div>
+      </div>
+
+    </div>
+  </section>
+
   <!-- ── Live Edge Telemetry (FlyonUI Stats Grid) ── -->
   <section class="py-12 bg-base-100 border-b border-base-300">
     <div class="max-w-6xl mx-auto px-4 sm:px-6">
@@ -247,6 +309,9 @@ export function renderLandingHtml(options?: RenderLandingOptions): string {
           <h2 class="text-2xl sm:text-3xl font-bold tracking-tight">Real-time Caching Performance</h2>
         </div>
         <div class="flex items-center gap-3 text-xs text-base-content/70">
+          <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-primary/10 text-primary font-medium">
+            <span class="w-1.5 h-1.5 rounded-full bg-primary"></span> Vector AI Active
+          </span>
           <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-success/10 text-success font-medium">
             <span class="w-1.5 h-1.5 rounded-full bg-success"></span> KV Cache ${escHtml(kvStatus.toUpperCase())}
           </span>
@@ -257,13 +322,21 @@ export function renderLandingHtml(options?: RenderLandingOptions): string {
       </div>
 
       <!-- Stats Cards -->
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
         
         <div class="bg-base-200/60 border border-base-300 rounded-xl p-5 hover:border-primary/40 transition">
           <div class="text-xs font-medium text-base-content/60 uppercase tracking-wider mb-1">Cached Events</div>
           <div class="text-2xl sm:text-3xl font-extrabold text-base-content">${escHtml(totalEventsFormatted)}</div>
           <div class="text-[11px] text-base-content/60 mt-1 flex items-center gap-1">
             <span>Indexed in Cloudflare D1</span>
+          </div>
+        </div>
+
+        <div class="bg-base-200/60 border border-base-300 rounded-xl p-5 hover:border-primary/40 transition">
+          <div class="text-xs font-medium text-base-content/60 uppercase tracking-wider mb-1">Searchable Vectors</div>
+          <div class="text-2xl sm:text-3xl font-extrabold text-primary">${escHtml(totalVectorsFormatted)}</div>
+          <div class="text-[11px] text-base-content/60 mt-1 flex items-center gap-1">
+            <span>1024-dim Vector AI</span>
           </div>
         </div>
 
@@ -283,7 +356,7 @@ export function renderLandingHtml(options?: RenderLandingOptions): string {
           </div>
         </div>
 
-        <div class="bg-base-200/60 border border-base-300 rounded-xl p-5 hover:border-primary/40 transition">
+        <div class="bg-base-200/60 border border-base-300 rounded-xl p-5 hover:border-primary/40 transition col-span-2 md:col-span-1">
           <div class="text-xs font-medium text-base-content/60 uppercase tracking-wider mb-1">Upstream Pool</div>
           <div class="text-2xl sm:text-3xl font-extrabold text-primary">${upstreamCount} Relays</div>
           <div class="text-[11px] text-base-content/60 mt-1 flex items-center gap-1">
@@ -829,6 +902,141 @@ nak req -k 1 -l 10 <span class="text-emerald-400">"wss://${escHtml(relayHost)}?r
           }
         });
       });
+      // 3. Vector Search UI Handler
+      var searchForm = document.getElementById('landing-search-form');
+      var searchInput = document.getElementById('landing-search-input');
+      var searchBtn = document.getElementById('landing-search-btn');
+      var resultsWrapper = document.getElementById('search-results-wrapper');
+      var resultsList = document.getElementById('search-results-list');
+      var statusText = document.getElementById('search-status-text');
+      var timeText = document.getElementById('search-time-text');
+      var selectedKinds = '1,0,30023';
+
+      // Kind filter pills handler
+      document.querySelectorAll('.kind-pill').forEach(function(pill) {
+        pill.addEventListener('click', function() {
+          document.querySelectorAll('.kind-pill').forEach(function(p) {
+            p.classList.remove('btn-primary');
+            p.classList.add('btn-outline', 'btn-neutral');
+          });
+          pill.classList.remove('btn-outline', 'btn-neutral');
+          pill.classList.add('btn-primary');
+          selectedKinds = pill.getAttribute('data-kinds') || '1,0,30023';
+          if (searchInput && searchInput.value.trim().length > 0) {
+            performSearch(searchInput.value.trim());
+          }
+        });
+      });
+
+      function escapeHtml(str) {
+        if (!str) return '';
+        return String(str)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      }
+
+      function performSearch(q) {
+        if (!q) return;
+        if (resultsWrapper) resultsWrapper.classList.remove('hidden');
+        if (statusText) statusText.textContent = 'Searching vector index...';
+        if (timeText) timeText.textContent = '';
+        if (resultsList) {
+          resultsList.innerHTML = '<div class="p-8 text-center text-sm text-base-content/60"><span class="loading loading-spinner loading-md text-primary"></span><div class="mt-2">Computing semantic embeddings & querying vector index...</div></div>';
+        }
+
+        var url = '/api/search?q=' + encodeURIComponent(q) + '&kinds=' + encodeURIComponent(selectedKinds) + '&limit=15';
+        fetch(url)
+          .then(function(res) { return res.json(); })
+          .then(function(data) {
+            if (!resultsList || !statusText) return;
+            if (!data.results || data.results.length === 0) {
+              statusText.textContent = 'No matching events found for "' + escapeHtml(q) + '"';
+              if (timeText) timeText.textContent = data.tookMs ? data.tookMs + 'ms' : '';
+              resultsList.innerHTML = '<div class="bg-base-100 border border-base-300 rounded-xl p-6 text-center text-sm text-base-content/60">No events matched your vector search criteria. Try a broader search term or different kind filter.</div>';
+              return;
+            }
+
+            statusText.textContent = 'Found ' + data.results.length + ' matching event' + (data.results.length === 1 ? '' : 's');
+            if (timeText) timeText.textContent = (data.tookMs || 0) + 'ms';
+
+            var html = '';
+            data.results.forEach(function(item) {
+              var ev = item.event;
+              var scorePercent = Math.min(100, Math.max(0, Math.round((item.score || 0) * 100)));
+              var kindName = 'Event (k:' + ev.kind + ')';
+              var kindBadgeClass = 'badge-neutral';
+              var njumpText = 'Open in njump ↗';
+
+              if (ev.kind === 1) {
+                kindName = 'Note (kind 1)';
+                kindBadgeClass = 'badge-primary';
+                njumpText = 'View Note on njump ↗';
+              } else if (ev.kind === 0) {
+                kindName = 'Profile (kind 0)';
+                kindBadgeClass = 'badge-secondary';
+                njumpText = 'View Profile on njump ↗';
+              } else if (ev.kind === 30023) {
+                kindName = 'Article (kind 30023)';
+                kindBadgeClass = 'badge-accent';
+                njumpText = 'Read Article on njump ↗';
+              }
+
+              var authorName = (item.author && (item.author.displayName || item.author.name)) || (ev.pubkey.slice(0, 8) + '…' + ev.pubkey.slice(-4));
+              var nip05 = item.author && item.author.nip05 ? '<span class="text-xs text-primary font-medium ml-1.5">✓ ' + escapeHtml(item.author.nip05) + '</span>' : '';
+              var dateStr = new Date(ev.created_at * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+
+              var contentSnippet = escapeHtml(item.summary || ev.content || '');
+              if (contentSnippet.length > 280) {
+                contentSnippet = contentSnippet.slice(0, 280) + '…';
+              }
+
+              var titleHtml = item.title ? '<div class="text-base font-bold text-base-content mb-1">' + escapeHtml(item.title) + '</div>' : '';
+
+              html += '<div class="bg-base-100 border border-base-300 rounded-xl p-4 sm:p-5 shadow-sm hover:border-primary/50 transition flex flex-col justify-between gap-3">';
+              html += '  <div>';
+              html += '    <div class="flex flex-wrap items-center justify-between gap-2 mb-2">';
+              html += '      <div class="flex items-center gap-2">';
+              html += '        <span class="badge badge-sm badge-soft ' + kindBadgeClass + ' font-semibold">' + kindName + '</span>';
+              html += '        <span class="text-xs font-semibold text-base-content/80">' + escapeHtml(authorName) + '</span>' + nip05;
+              html += '      </div>';
+              html += '      <div class="flex items-center gap-2">';
+              html += '        <span class="badge badge-xs badge-soft badge-success font-bold text-[10px]">' + scorePercent + '% Match</span>';
+              html += '        <span class="text-[11px] text-base-content/50">' + dateStr + '</span>';
+              html += '      </div>';
+              html += '    </div>';
+              html += titleHtml;
+              html += '    <p class="text-xs sm:text-sm text-base-content/80 whitespace-pre-wrap leading-relaxed break-words">' + contentSnippet + '</p>';
+              html += '  </div>';
+              html += '  <div class="flex items-center justify-between pt-2 border-t border-base-200 text-xs">';
+              html += '    <span class="code-font text-[11px] text-base-content/40 truncate max-w-[200px] sm:max-w-[300px]">id: ' + escapeHtml(ev.id) + '</span>';
+              html += '    <a href="' + escapeHtml(item.njumpUrl) + '" target="_blank" rel="noopener noreferrer" class="btn btn-xs btn-outline btn-primary rounded-lg gap-1 font-medium">';
+              html += '      <span>' + njumpText + '</span>';
+              html += '    </a>';
+              html += '  </div>';
+              html += '</div>';
+            });
+
+            resultsList.innerHTML = html;
+          })
+          .catch(function(err) {
+            if (!resultsList || !statusText) return;
+            statusText.textContent = 'Search failed';
+            resultsList.innerHTML = '<div class="bg-error/10 border border-error/30 text-error rounded-xl p-4 text-xs">Error querying vector search engine: ' + escapeHtml(err.message || 'Unknown error') + '</div>';
+          });
+      }
+
+      if (searchForm && searchInput) {
+        searchForm.addEventListener('submit', function(e) {
+          e.preventDefault();
+          var q = searchInput.value.trim();
+          if (q.length > 0) {
+            performSearch(q);
+          }
+        });
+      }
     })();
   </script>
 

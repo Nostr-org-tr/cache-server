@@ -1,5 +1,6 @@
 import { ClientSession } from './durable-objects/client-session';
 import { runGarbageCollection } from './db/gc';
+import { backfillUnindexedVectors } from './db';
 import { generateDashboard } from './dashboard/generator';
 import { handleHttpRequest } from './http/router';
 import type { Env } from './types/env';
@@ -31,11 +32,20 @@ export default {
           })
       );
     } else if (event.cron === CRON_DASHBOARD) {
-      // Every hour — rebuild static dashboard HTML and store in KV
+      // Every hour — rebuild static dashboard HTML and backfill unindexed vector embeddings
       ctx.waitUntil(
-        generateDashboard(env).catch((err) => {
-          console.error('[Dashboard] Unhandled error in generateDashboard:', err);
-        })
+        Promise.allSettled([
+          generateDashboard(env).catch((err) => {
+            console.error('[Dashboard] Unhandled error in generateDashboard:', err);
+          }),
+          backfillUnindexedVectors(env.DB, env).then((count) => {
+            if (count > 0) {
+              console.log(`[Vectorize] Successfully backfilled ${count} vector embeddings`);
+            }
+          }).catch((err) => {
+            console.error('[Vectorize] Background vector backfill failed:', err);
+          }),
+        ])
       );
     } else {
       console.warn(`[Scheduled] Unknown cron expression received: ${event.cron}`);

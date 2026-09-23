@@ -48,6 +48,15 @@
       "0 * * * *"
     ]
   },
+  "ai": {
+    "binding": "AI"
+  },
+  "vectorize": [
+    {
+      "binding": "VECTOR_INDEX",
+      "index_name": "nostr-events-vector"
+    }
+  ],
   "vars": {
     "RELAY_NAME": "Nostr Turkey Regional Cache",
     "RELAY_DESCRIPTION": "High-Performance Regional Edge-Caching Nostr Relay (Read-only cache. Direct writes are not allowed.)",
@@ -59,6 +68,8 @@
     "RATE_LIMIT_MSG_PER_WINDOW": "300",
     "RATE_LIMIT_PUBKEY_WRITES_PER_MIN": "60",
     "ALLOW_DIRECT_WRITES": "false",
-    "ENABLE_KV_CACHE": "true"
+    "ENABLE_KV_CACHE": "true",
+    "VECTOR_SEARCH_ENABLED": "true",
+    "VECTOR_EMBEDDING_MODEL": "@cf/baai/bge-m3"
   }
 }

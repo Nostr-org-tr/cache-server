@@ -65,6 +65,20 @@ export function matchFilter(filter: NostrFilter, event: NostrEvent): boolean {
     }
   }
 
+  // 7. Check NIP-50 search field matching for live events
+  if (filter.search && filter.search.trim().length > 0) {
+    const rawContent = (event.content || '').toLowerCase();
+    const query = filter.search.toLowerCase();
+    const searchTerms = query.split(/\s+/).filter((t) => t.length > 0 && !t.includes(':'));
+    
+    // All clean text search terms should match the live event content
+    for (const term of searchTerms) {
+      if (!rawContent.includes(term)) {
+        return false;
+      }
+    }
+  }
+
   return true;
 }
 
