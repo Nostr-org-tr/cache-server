@@ -6,7 +6,7 @@
  * Managed via `make version-*` and `scripts/bump-version.ts`.
  */
 
-export const APP_VERSION = '2.0.1';
+export const APP_VERSION = '2.1.0';
 export const APP_NAME = 'cache.nostr.org.tr';
 export const APP_DESCRIPTION =
   'High-Performance Nostr Regional Cache Relay (Read-only cache. Direct writes are not allowed; events are ingested from upstream relays).';
