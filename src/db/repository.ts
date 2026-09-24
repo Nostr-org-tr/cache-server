@@ -970,7 +970,7 @@ export async function querySearchEvents(
 export async function backfillUnindexedVectors(
   db: D1Database,
   env: Env,
-  batchLimit = 150
+  batchLimit = 50
 ): Promise<number> {
   if (!env.AI || !env.VECTOR_INDEX || env.VECTOR_SEARCH_ENABLED === 'false') {
     return 0;
@@ -1001,12 +1001,18 @@ export async function backfillUnindexedVectors(
   );
 
   if (events.length > 0) {
-    const placeholders = events.map(() => '?').join(', ');
-    const eventIds = events.map((e) => e.id);
-    await db
-      .prepare(`UPDATE events SET vector_indexed = 1 WHERE id IN (${placeholders})`)
-      .bind(...eventIds)
-      .run();
+    const statements: D1PreparedStatement[] = [];
+    for (let i = 0; i < events.length; i += MAX_SQL_PARAM_ARRAY_SIZE) {
+      const chunk = events.slice(i, i + MAX_SQL_PARAM_ARRAY_SIZE);
+      const placeholders = chunk.map(() => '?').join(', ');
+      const eventIds = chunk.map((e) => e.id);
+      statements.push(
+        db
+          .prepare(`UPDATE events SET vector_indexed = 1 WHERE id IN (${placeholders})`)
+          .bind(...eventIds)
+      );
+    }
+    await executeBatchSafe(db, statements);
   }
 
   return indexedCount;

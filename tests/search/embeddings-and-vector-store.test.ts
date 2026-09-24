@@ -11,6 +11,7 @@ import {
   indexEventsBatchVector,
   indexEventVector,
   queryVectorIndex,
+  upsertVectorsWithRetry,
 } from '../../src/search/vector-store';
 import type { NostrEvent } from '../../src/types/nostr';
 
@@ -400,6 +401,29 @@ describe('Search Embeddings & Vector Store', () => {
       expect(results[0]?.score).toBe(0.94);
       expect(results[1]?.id).toBe('id-lower-score');
       expect(results[1]?.score).toBe(0.72);
+    });
+
+    it('retries on Vectorize rate limit error (40041 / Too Many Requests) and succeeds', async () => {
+      const mockVectorIndex = {
+        upsert: vi
+          .fn()
+          .mockRejectedValueOnce(new Error('VECTOR_UPSERT_ERROR (code = 40041): Too Many Requests'))
+          .mockResolvedValueOnce({ count: 1 }),
+      } as unknown as VectorizeIndex;
+
+      const vectors = [{ id: 'test-id', values: [0.1, 0.2], metadata: { kind: 1 } }];
+      await expect(upsertVectorsWithRetry(mockVectorIndex, vectors, 1)).resolves.toBeUndefined();
+      expect(mockVectorIndex.upsert).toHaveBeenCalledTimes(2);
+    });
+
+    it('throws error when non-rate-limit error occurs in upsert', async () => {
+      const mockVectorIndex = {
+        upsert: vi.fn().mockRejectedValueOnce(new Error('FATAL_DATABASE_ERROR')),
+      } as unknown as VectorizeIndex;
+
+      const vectors = [{ id: 'test-id', values: [0.1, 0.2], metadata: { kind: 1 } }];
+      await expect(upsertVectorsWithRetry(mockVectorIndex, vectors, 1)).rejects.toThrow('FATAL_DATABASE_ERROR');
+      expect(mockVectorIndex.upsert).toHaveBeenCalledTimes(1);
     });
   });
 });

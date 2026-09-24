@@ -8,9 +8,9 @@ import {
   queryEventsHybrid,
   querySearchEvents,
   saveEvent,
-  saveEventsBatch,
 } from '../db';
-import { indexEventsBatchVector, indexEventVector } from '../search';
+import { indexEventVector } from '../search';
+
 import {
   formatClosedMessage,
   formatCountMessage,
@@ -237,9 +237,9 @@ export class ClientSession extends DurableObject<Env> {
         this.poolManager.abort(subId);
         this.subscriptions.delete(subId);
         this.sentEventIds.delete(subId);
-        ws.send(formatClosedMessage(subId, 'subscription closed'));
         return;
       }
+
 
       case 'REQ': {
         const subId = clientMsg[1];
@@ -335,52 +335,59 @@ export class ClientSession extends DurableObject<Env> {
           }
         }
 
-        // 4. Perform parallel upstream pull-through
-        const pullResult = await this.poolManager.pullEvents(
-          {
-            subId,
-            filters,
-            relayUrls: targetRelays,
-          },
-          (event: NostrEvent) => {
-            const modResult = inspectEventModeration(event, this.moderationRuleset);
-            if (!modResult.allowed) {
-              return;
-            }
-            if (!sentSet.has(event.id)) {
-              ws.send(formatEventMessage(subId, event));
-              sentSet.add(event.id);
-            }
-          }
-        );
+        // 4. Perform parallel upstream pull and persistent live streaming
+        await new Promise<void>((resolve) => {
+          this.poolManager.subscribeLive(
+            {
+              subId,
+              filters,
+              relayUrls: targetRelays,
+            },
+            {
+              onEvent: (event: NostrEvent) => {
+                const modResult = inspectEventModeration(event, this.moderationRuleset);
+                if (!modResult.allowed) {
+                  return;
+                }
+                if (!sentSet.has(event.id)) {
+                  try {
+                    ws.send(formatEventMessage(subId, event));
+                    sentSet.add(event.id);
+                  } catch {
+                    // Socket may be closed
+                  }
+                }
 
-        // 5. Emit EOSE to client once all upstream relays complete or time out
-        ws.send(formatEoseMessage(subId));
-
-        // 6. Asynchronously persist newly pulled non-ephemeral, non-moderated events into D1 and L0 memory / L1 KV, plus background vector indexing
-        if (pullResult.events.length > 0) {
-          const nonEphemeral = pullResult.events.filter(
-            (e) =>
-              !(e.kind >= 20000 && e.kind < 30000) &&
-              inspectEventModeration(e, this.moderationRuleset).allowed
+                // Asynchronously persist newly pulled non-ephemeral, non-moderated events into D1/KV.
+                // Vector indexing for upstream events is safely handled via scheduled background backfill.
+                const isEphemeral = event.kind >= 20000 && event.kind < 30000;
+                if (!isEphemeral) {
+                  void saveEvent(this.env.DB, event)
+                    .then(() => {
+                      if (kv) {
+                        void putMetadataToKv(kv, event);
+                      }
+                    })
+                    .catch((err) => console.error('Background live event save error:', err));
+                }
+              },
+              onInitialEose: () => {
+                // 5. Emit EOSE to client once all upstream relays complete initial sync or time out
+                try {
+                  ws.send(formatEoseMessage(subId));
+                } catch {
+                  // Socket may be closed
+                }
+                resolve();
+              },
+            }
           );
-          if (nonEphemeral.length > 0) {
-            await saveEventsBatch(this.env.DB, nonEphemeral, kv);
-
-            // Non-blocking background vector indexing
-            if (this.env.AI && this.env.VECTOR_INDEX && this.env.VECTOR_SEARCH_ENABLED !== 'false') {
-              void indexEventsBatchVector(
-                this.env.AI,
-                this.env.VECTOR_INDEX,
-                nonEphemeral,
-                this.env.VECTOR_EMBEDDING_MODEL
-              ).catch((err) => console.error('Background vector batch indexing error:', err));
-            }
-          }
-        }
+        });
 
         return;
       }
+
+
 
       case 'EVENT': {
         const event = clientMsg[1];
@@ -479,8 +486,14 @@ export class ClientSession extends DurableObject<Env> {
             void putMetadataToKv(kv, event);
           }
 
-          // Non-blocking background vector indexing
-          if (this.env.AI && this.env.VECTOR_INDEX && this.env.VECTOR_SEARCH_ENABLED !== 'false') {
+          // Non-blocking background vector indexing for searchable kinds (0, 1, 30023, 9802)
+          const isSearchableKind = [0, 1, 30023, 9802].includes(event.kind);
+          if (
+            isSearchableKind &&
+            this.env.AI &&
+            this.env.VECTOR_INDEX &&
+            this.env.VECTOR_SEARCH_ENABLED !== 'false'
+          ) {
             void indexEventVector(
               this.env.AI,
               this.env.VECTOR_INDEX,

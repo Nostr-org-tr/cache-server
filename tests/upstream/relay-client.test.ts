@@ -190,9 +190,166 @@ describe('UpstreamRelayClient', () => {
     await new Promise((resolve) => setTimeout(resolve, 30));
     client.close();
 
+
     expect(mockWs!.readyState).toBe(WebSocket.CLOSED);
     const lastSent = JSON.parse(mockWs!.sentMessages[mockWs!.sentMessages.length - 1]!);
     expect(lastSent[0]).toBe('CLOSE');
     expect(lastSent[1]).toBe('sub_close');
   });
+
+
+  it('keeps connection alive after EOSE and streams subsequent live events', async () => {
+    let mockWs: MockClientWebSocket | null = null;
+    const client = new UpstreamRelayClient('wss://relay.damus.io', {
+      webSocketFactory: (url) => {
+        mockWs = new MockClientWebSocket(url);
+        return mockWs as unknown as WebSocket;
+      },
+    });
+
+    const receivedEvents: { event: NostrEvent; isLive: boolean }[] = [];
+    let eoseCount = 0;
+
+    const initialEvent = createSignedEvent(privKey, {
+      kind: 1,
+      created_at: 1000,
+      content: 'Initial history note',
+    });
+
+    const liveEvent = createSignedEvent(privKey, {
+      kind: 1,
+      created_at: 2000,
+      content: 'Subsequent live note',
+    });
+
+    client.subscribe(
+      'sub_live',
+      [{ kinds: [1] }],
+      {
+        onEvent: (event, isLive) => receivedEvents.push({ event, isLive }),
+        onEose: () => {
+          eoseCount++;
+        },
+        onError: () => {},
+      }
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    // 1. Initial history event arrives before EOSE
+    mockWs!.simulateServerMessage(JSON.stringify(['EVENT', 'sub_live', initialEvent]));
+    expect(receivedEvents).toHaveLength(1);
+    expect(receivedEvents[0]!.isLive).toBe(false);
+
+    // 2. Relay sends EOSE
+    mockWs!.simulateServerMessage(JSON.stringify(['EOSE', 'sub_live']));
+    expect(eoseCount).toBe(1);
+    expect(client.isInitialEoseReceived()).toBe(true);
+    expect(client.getStatus()).toBe('live');
+
+    // 3. Subsequent live event arrives AFTER EOSE
+    mockWs!.simulateServerMessage(JSON.stringify(['EVENT', 'sub_live', liveEvent]));
+    expect(receivedEvents).toHaveLength(2);
+    expect(receivedEvents[1]!.isLive).toBe(true);
+    expect(receivedEvents[1]!.event.id).toBe(liveEvent.id);
+
+    client.close();
+  });
+
+  it('defaultWebSocketFactory converts wss to https and calls fetch with websocket upgrade', async () => {
+    let fetchCalledWithUrl = '';
+    let fetchHeaders: Record<string, string> = {};
+    let acceptCalled = false;
+
+    const mockWs = new MockClientWebSocket('wss://relay.damus.io');
+    (mockWs as unknown as { accept: () => void }).accept = () => {
+      acceptCalled = true;
+    };
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetchCalledWithUrl = input.toString();
+      fetchHeaders = (init?.headers as Record<string, string>) || {};
+      return {
+        status: 101,
+        statusText: 'Switching Protocols',
+        webSocket: mockWs as unknown as WebSocket,
+      } as unknown as Response;
+    }) as typeof fetch;
+
+    try {
+      const { defaultWebSocketFactory } = await import('../../src/upstream/relay-client');
+      const ws = await defaultWebSocketFactory('wss://relay.damus.io');
+
+      expect(fetchCalledWithUrl).toBe('https://relay.damus.io');
+      expect(fetchHeaders.Upgrade).toBe('websocket');
+      expect(acceptCalled).toBe(true);
+      expect(ws).toBe(mockWs);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('handles async webSocketFactory rejection gracefully', async () => {
+    const client = new UpstreamRelayClient('wss://unreachable.relay', {
+      webSocketFactory: async () => {
+        throw new Error('Connection refused');
+      },
+    });
+
+    let errorReceived: Error | null = null;
+    client.subscribe(
+      'sub_fail',
+      [{ kinds: [1] }],
+      {
+        onEvent: () => {},
+        onEose: () => {},
+        onError: (err) => {
+          errorReceived = err;
+        },
+      }
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(client.getStatus()).toBe('error');
+    expect(errorReceived).toBeDefined();
+    expect(errorReceived!.message).toContain('Connection refused');
+  });
+
+  it('cleans up properly if client.close() is called before async connection resolves', async () => {
+    let mockWs: MockClientWebSocket | null = null;
+    let resolveFactory: (ws: WebSocket) => void = () => {};
+
+    const client = new UpstreamRelayClient('wss://slow.relay', {
+      webSocketFactory: () =>
+        new Promise((resolve) => {
+          resolveFactory = resolve;
+        }),
+    });
+
+    client.subscribe(
+      'sub_slow',
+      [{ kinds: [1] }],
+      {
+        onEvent: () => {},
+        onEose: () => {},
+        onError: () => {},
+      }
+    );
+
+    // Close before factory resolves
+    client.close();
+
+    // Now resolve factory
+    mockWs = new MockClientWebSocket('wss://slow.relay');
+    resolveFactory(mockWs as unknown as WebSocket);
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(client.getStatus()).toBe('closed');
+    expect(mockWs.readyState).toBe(WebSocket.CLOSED);
+  });
 });
+
+

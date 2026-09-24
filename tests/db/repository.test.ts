@@ -1,6 +1,7 @@
-import { beforeEach, describe, expect, it } from 'vitest';
-import { countEvents, queryEvents, saveEvent, saveEventsBatch } from '../../src/db/repository';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { backfillUnindexedVectors, countEvents, queryEvents, saveEvent, saveEventsBatch } from '../../src/db/repository';
 import type { NostrEvent } from '../../src/types/nostr';
+import type { Env } from '../../src/types/env';
 import { MockD1Database } from '../mocks/mock-d1';
 
 describe('D1 Event Repository', () => {
@@ -370,6 +371,62 @@ describe('D1 Event Repository', () => {
 
       const count = await countEvents(db, [{ kinds: [1], authors: allAuthors }]);
       expect(count).toBe(1);
+    });
+  });
+
+  describe('backfillUnindexedVectors', () => {
+    it('should backfill unindexed events in safe chunks when batch exceeds 50 items', async () => {
+      // Create 75 unindexed kind 1 events
+      for (let i = 0; i < 75; i++) {
+        const id = i.toString(16).padStart(64, '0');
+        const event: NostrEvent = {
+          id,
+          pubkey: 'a'.repeat(64),
+          created_at: 1000 + i,
+          kind: 1,
+          tags: [],
+          content: `Substantive test note number ${i} for vector indexing`,
+          sig: 'f'.repeat(128),
+        };
+        await saveEvent(db, event);
+      }
+
+      const mockAi = {
+        run: vi.fn().mockImplementation(async (_model: string, { text }: { text: string[] }) => {
+          return { data: text.map(() => [0.1, 0.2, 0.3]) };
+        }),
+      } as unknown as Ai;
+
+      const mockVectorIndex = {
+        upsert: vi.fn().mockResolvedValue({ count: 50 }),
+      } as unknown as VectorizeIndex;
+
+      const mockEnv = {
+        DB: db,
+        AI: mockAi,
+        VECTOR_INDEX: mockVectorIndex,
+        VECTOR_SEARCH_ENABLED: 'true',
+      } as unknown as Env;
+
+      const count = await backfillUnindexedVectors(db, mockEnv, 75);
+      expect(count).toBe(75);
+      expect(mockVectorIndex.upsert).toHaveBeenCalled();
+
+      // Verify that all 75 events have vector_indexed = 1 in db
+      const indexedCount = Array.from(db.events.values()).filter(
+        (e) => (e as any).vector_indexed === 1
+      ).length;
+      expect(indexedCount).toBe(75);
+    });
+
+    it('should return 0 when vector search is disabled', async () => {
+      const mockEnv = {
+        DB: db,
+        VECTOR_SEARCH_ENABLED: 'false',
+      } as unknown as Env;
+
+      const count = await backfillUnindexedVectors(db, mockEnv);
+      expect(count).toBe(0);
     });
   });
 });

@@ -22,6 +22,12 @@
 - 💤 **WebSocket Hibernation:** Uses Cloudflare Workers WebSocket Hibernation API within Durable Objects to maintain thousands of idle client sessions with minimal CPU and memory footprint.
 - 🔒 **Read-Only Cache Mode:** Operates as a transparent pull-through cache. Direct client writes are rejected by default with NIP-20 `OK: false: blocked: cache relay is read-only` unless explicitly configured.
 
+> [!IMPORTANT]
+> **Current Scope & Usage Disclaimer:**
+> `cache.nostr.org.tr` is currently best suited for **personal development, targeted event lookups, and simple single-subscription queries** (e.g. CLI tools like `nak`, metadata caching, and profile lookups).
+> 
+> It is **not currently recommended as a single, standalone read relay for complex client feed building** (e.g. web/mobile clients like Ditto, Coracle, or Snort that fire many concurrent multi-kind subscription queries to compile full timelines). Full upstream multiplexing and multi-subscription synchronization for heavy social feed clients are under ongoing development.
+
 ---
 
 ## 2. Architecture & Data Flow

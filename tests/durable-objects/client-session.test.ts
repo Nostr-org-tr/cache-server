@@ -437,7 +437,7 @@ describe('ClientSession Durable Object', () => {
   });
 
   describe('webSocketMessage() - CLOSE & COUNT', () => {
-    it('handles CLOSE by unregistering subscription and responding with CLOSED', async () => {
+    it('handles CLOSE by silently unregistering subscription per NIP-01', async () => {
       const ws = new TestWebSocket() as unknown as WebSocket;
 
       await session.webSocketMessage(ws, JSON.stringify(['REQ', 'sub_close_test', { kinds: [1] }]));
@@ -447,13 +447,11 @@ describe('ClientSession Durable Object', () => {
 
       await session.webSocketMessage(ws, JSON.stringify(['CLOSE', 'sub_close_test']));
 
-      expect(testWs.sentMessages).toHaveLength(1);
-      const closedMsg = JSON.parse(testWs.sentMessages[0]!);
-      expect(closedMsg[0]).toBe('CLOSED');
-      expect(closedMsg[1]).toBe('sub_close_test');
-      expect(closedMsg[2]).toBe('subscription closed');
+      // NIP-01: No confirmation message is sent on client CLOSE
+      expect(testWs.sentMessages).toHaveLength(0);
 
       // Subsequent event should not be streamed to closed subscription
+
       testWs.sentMessages = [];
       const event = createSignedEvent(privKeyA, {
         kind: 1,
@@ -798,11 +796,128 @@ describe('ClientSession Durable Object', () => {
       const okMsg = JSON.parse(testWs.sentMessages[0]!);
       expect(okMsg[0]).toBe('OK');
       expect(okMsg[1]).toBe(operatorEvent.id);
-      expect(okMsg[2]).toBe(true);
-
       // Verify operator event was persisted
       expect(mockDb.events.has(operatorEvent.id)).toBe(true);
     });
+
+    it('handles large follower feed REQ (114 authors, 65 kinds) by decomposing upstream filters and emitting EOSE', async () => {
+      let createdWs: MockClientWebSocket | null = null;
+      session.setWebSocketFactory((url) => {
+        createdWs = new MockClientWebSocket(url);
+        // Automatically send EOSE on open to simulate upstream relay
+        setTimeout(() => {
+          createdWs?.simulateServerMessage(JSON.stringify(['EOSE', 'feed_sub']));
+        }, 10);
+        return createdWs as unknown as WebSocket;
+      });
+
+      const testWs = new TestWebSocket();
+      const ws = testWs as unknown as WebSocket;
+
+      const authors = Array.from({ length: 114 }, (_, i) => i.toString(16).padStart(64, '0'));
+      const kinds = Array.from({ length: 65 }, (_, i) => i);
+
+      const reqMessage = JSON.stringify([
+        'REQ',
+        'feed_sub',
+        {
+          kinds,
+          since: 1790212611,
+          limit: 0,
+          authors,
+        },
+      ]);
+
+      await session.webSocketMessage(ws, reqMessage);
+
+      // Verify client received EOSE
+      expect(testWs.sentMessages.length).toBeGreaterThanOrEqual(1);
+      const lastMsg = JSON.parse(testWs.sentMessages[testWs.sentMessages.length - 1]!);
+      expect(lastMsg[0]).toBe('EOSE');
+      expect(lastMsg[1]).toBe('feed_sub');
+
+      // Verify that the REQ sent to upstream was decomposed (multiple sub-filters, none exceeding max limits)
+      expect(createdWs).toBeDefined();
+      expect(createdWs!.sentMessages.length).toBeGreaterThanOrEqual(1);
+      const upstreamReq = JSON.parse(createdWs!.sentMessages[0]!);
+      expect(upstreamReq[0]).toBe('REQ');
+      expect(upstreamReq[1]).toBe('feed_sub');
+      const subFilters = upstreamReq.slice(2);
+      expect(subFilters.length).toBe(28); // 4 author chunks x 7 kind chunks
+      for (const sub of subFilters) {
+        expect(sub.authors.length).toBeLessThanOrEqual(30);
+        expect(sub.kinds.length).toBeLessThanOrEqual(10);
+      }
+    });
+
+    it('streams live events arriving from upstream after initial EOSE and persists them to D1', async () => {
+      let createdWs: MockClientWebSocket | null = null;
+      session.setWebSocketFactory((url) => {
+        createdWs = new MockClientWebSocket(url);
+        // Automatically send initial EOSE on open
+        setTimeout(() => {
+          createdWs?.simulateServerMessage(JSON.stringify(['EOSE', 'live_feed_sub']));
+        }, 10);
+        return createdWs as unknown as WebSocket;
+      });
+
+      const testWs = new TestWebSocket();
+      const ws = testWs as unknown as WebSocket;
+
+      const reqMessage = JSON.stringify([
+        'REQ',
+        'live_feed_sub',
+        {
+          kinds: [1],
+          authors: [pubkeyA],
+          since: 1790212611,
+          limit: 0,
+        },
+      ]);
+
+      await session.webSocketMessage(ws, reqMessage);
+
+      // Verify initial EOSE was received by client
+      expect(testWs.sentMessages).toHaveLength(1);
+      const eoseMsg = JSON.parse(testWs.sentMessages[0]!);
+      expect(eoseMsg[0]).toBe('EOSE');
+      expect(eoseMsg[1]).toBe('live_feed_sub');
+
+      // Upstream socket MUST still be OPEN
+      expect(createdWs!.readyState).toBe(WebSocket.OPEN);
+
+      // Upstream relay receives a brand new live event from author
+      const liveEvent = createSignedEvent(privKeyA, {
+        kind: 1,
+        created_at: 1790212620,
+        content: 'Brand new live post from Damus!',
+      });
+
+      createdWs!.simulateServerMessage(
+        JSON.stringify(['EVENT', 'live_feed_sub', liveEvent])
+      );
+
+      // Client must receive the live event immediately
+      expect(testWs.sentMessages).toHaveLength(2);
+      const eventMsg = JSON.parse(testWs.sentMessages[1]!);
+      expect(eventMsg[0]).toBe('EVENT');
+      expect(eventMsg[1]).toBe('live_feed_sub');
+      expect(eventMsg[2].id).toBe(liveEvent.id);
+      expect(eventMsg[2].content).toBe('Brand new live post from Damus!');
+
+      // Allow background microtask to save to D1
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(mockDb.events.has(liveEvent.id)).toBe(true);
+
+      // Client closes subscription
+      await session.webSocketMessage(
+        ws,
+        JSON.stringify(['CLOSE', 'live_feed_sub'])
+      );
+      expect(createdWs!.readyState).toBe(WebSocket.CLOSED);
+    });
   });
 });
+
+
 

@@ -243,4 +243,87 @@ describe('UpstreamPoolManager', () => {
       expect(ws.readyState).toBe(WebSocket.CLOSED);
     }
   });
+
+  it('coordinates subscribeLive across parallel upstreams, triggers initial EOSE, and streams live events', async () => {
+    const sockets = new Map<string, MockClientWebSocket>();
+
+    const poolManager = new UpstreamPoolManager(
+      {
+        defaultRelays: ['wss://relay1.com', 'wss://relay2.com'],
+        defaultTimeoutMs: 1000,
+      },
+      {
+        webSocketFactory: (url) => {
+          const mockWs = new MockClientWebSocket(url);
+          sockets.set(url, mockWs);
+          return mockWs as unknown as WebSocket;
+        },
+      }
+    );
+
+    const initialEvent = createSignedEvent(privKey, {
+      kind: 1,
+      created_at: 1000,
+      content: 'Initial event from relay1',
+    });
+
+    const liveEvent = createSignedEvent(privKey, {
+      kind: 1,
+      created_at: 2000,
+      content: 'Live event from relay2',
+    });
+
+    const receivedEvents: { event: NostrEvent; isInitial: boolean }[] = [];
+    let initialEoseFired = false;
+
+    const handle = poolManager.subscribeLive(
+      {
+        subId: 'sub_live_pool',
+        filters: [{ kinds: [1] }],
+      },
+      {
+        onEvent: (event, isInitial) => {
+          receivedEvents.push({ event, isInitial });
+        },
+        onInitialEose: () => {
+          initialEoseFired = true;
+        },
+      }
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const ws1 = sockets.get('wss://relay1.com')!;
+    const ws2 = sockets.get('wss://relay2.com')!;
+
+    // 1. Initial event arrives before EOSE
+    ws1.simulateServerMessage(JSON.stringify(['EVENT', 'sub_live_pool', initialEvent]));
+    expect(receivedEvents).toHaveLength(1);
+    expect(receivedEvents[0]!.isInitial).toBe(true);
+
+    // 2. Both relays send EOSE
+    ws1.simulateServerMessage(JSON.stringify(['EOSE', 'sub_live_pool']));
+    expect(initialEoseFired).toBe(false); // Waiting for ws2
+
+    ws2.simulateServerMessage(JSON.stringify(['EOSE', 'sub_live_pool']));
+    expect(initialEoseFired).toBe(true); // Now both completed
+    expect(handle.isInitialEoseComplete()).toBe(true);
+
+    // Sockets must stay OPEN for live streaming
+    expect(ws1.readyState).toBe(WebSocket.OPEN);
+    expect(ws2.readyState).toBe(WebSocket.OPEN);
+
+    // 3. Live event arrives after initial EOSE on relay2
+    ws2.simulateServerMessage(JSON.stringify(['EVENT', 'sub_live_pool', liveEvent]));
+    expect(receivedEvents).toHaveLength(2);
+    expect(receivedEvents[1]!.isInitial).toBe(false);
+    expect(receivedEvents[1]!.event.id).toBe(liveEvent.id);
+
+    // 4. Teardown
+    handle.close();
+    expect(ws1.readyState).toBe(WebSocket.CLOSED);
+    expect(ws2.readyState).toBe(WebSocket.CLOSED);
+    expect(poolManager.activeSubscriptionCount()).toBe(0);
+  });
 });
+

@@ -695,6 +695,20 @@ export class MockD1PreparedStatement implements D1PreparedStatement {
       return { results: [], success: true, meta: createMockMeta({ rows_written: deletedCount, changes: deletedCount }) };
     }
 
+    // UPDATE events SET vector_indexed = 1 WHERE id IN (...)
+    if (q.startsWith('UPDATE events SET vector_indexed = 1 WHERE id IN')) {
+      const idsToUpdate = this.boundParams as string[];
+      let updatedCount = 0;
+      for (const id of idsToUpdate) {
+        const ev = this.db.events.get(id);
+        if (ev) {
+          (ev as EventRow & { vector_indexed?: number }).vector_indexed = 1;
+          updatedCount++;
+        }
+      }
+      return { results: [], success: true, meta: createMockMeta({ rows_written: updatedCount, changes: updatedCount }) };
+    }
+
     return { results: [], success: true, meta: createMockMeta() };
   }
 
@@ -760,11 +774,22 @@ export class MockD1PreparedStatement implements D1PreparedStatement {
     if (q.includes('kind IN')) {
       const kindMatch = q.match(/\bkind IN \(([^)]+)\)/);
       if (kindMatch && kindMatch[1]) {
-        const count = kindMatch[1].split(',').length;
-        const kinds = this.boundParams.slice(paramIdx, paramIdx + count) as number[];
-        paramIdx += count;
-        rows = rows.filter((r) => kinds.includes(r.kind));
+        const inner = kindMatch[1].trim();
+        if (inner.includes('?')) {
+          const count = inner.split(',').length;
+          const kinds = this.boundParams.slice(paramIdx, paramIdx + count) as number[];
+          paramIdx += count;
+          rows = rows.filter((r) => kinds.includes(r.kind));
+        } else {
+          const literalKinds = inner.split(',').map((k) => Number(k.trim())).filter((k) => !Number.isNaN(k));
+          rows = rows.filter((r) => literalKinds.includes(r.kind));
+        }
       }
+    }
+
+    // Check vector_indexed = 0 / vector_indexed IS NULL
+    if (q.includes('vector_indexed = 0') || q.includes('vector_indexed IS NULL')) {
+      rows = rows.filter((r) => !(r as EventRow & { vector_indexed?: number }).vector_indexed);
     }
 
     // 3.1 Check kind >= ? AND kind <= ?

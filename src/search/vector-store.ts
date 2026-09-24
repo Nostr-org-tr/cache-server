@@ -6,6 +6,38 @@ import type { VectorSearchResult } from './types';
 export const MAX_VECTORIZE_BATCH_SIZE = 50;
 
 /**
+ * Executes a Vectorize upsert operation with exponential backoff on transient rate limits (40041 / 429).
+ */
+export async function upsertVectorsWithRetry(
+  vectorIndex: VectorizeIndex,
+  vectors: VectorizeVector[],
+  maxRetries = 2
+): Promise<void> {
+  let attempt = 0;
+  while (attempt <= maxRetries) {
+    try {
+      await vectorIndex.upsert(vectors);
+      return;
+    } catch (error) {
+      const errStr = String(error);
+      const isRateLimit =
+        errStr.includes('40041') ||
+        errStr.includes('Too Many Requests') ||
+        errStr.includes('429') ||
+        errStr.includes('rate limit');
+
+      if (isRateLimit && attempt < maxRetries) {
+        attempt++;
+        const backoffMs = attempt * 250;
+        await new Promise((resolve) => setTimeout(resolve, backoffMs));
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
+/**
  * Indexes a single Nostr event in Cloudflare Vectorize index.
  */
 export async function indexEventVector(
@@ -30,7 +62,7 @@ export async function indexEventVector(
   }
 
   try {
-    await vectorIndex.upsert([
+    await upsertVectorsWithRetry(vectorIndex, [
       {
         id: event.id,
         values: embeddings[0],
@@ -106,7 +138,7 @@ export async function indexEventsBatchVector(
 
     if (vectors.length > 0) {
       try {
-        await vectorIndex.upsert(vectors);
+        await upsertVectorsWithRetry(vectorIndex, vectors);
         totalIndexed += vectors.length;
       } catch (error) {
         console.error('Failed to batch upsert vectors to Vectorize:', error);

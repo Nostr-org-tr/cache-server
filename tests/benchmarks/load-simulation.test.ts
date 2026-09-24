@@ -214,12 +214,11 @@ describe('Load & Concurrency Simulation Benchmarks', () => {
 
       await Promise.all(closePromises);
 
-      for (const { ws, subId } of sessions) {
-        expect(ws.sentMessages.length).toBe(1);
-        const closedMsg = JSON.parse(ws.sentMessages[0]!);
-        expect(closedMsg[0]).toBe('CLOSED');
-        expect(closedMsg[1]).toBe(subId);
+      for (const { ws } of sessions) {
+        // NIP-01: No confirmation message is sent on client CLOSE
+        expect(ws.sentMessages.length).toBe(0);
       }
     });
   });
 });
+
