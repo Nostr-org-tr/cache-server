@@ -242,4 +242,141 @@ describe('ClientSession - Content Moderation & Operator Rule Enforcement', () =>
     expect(blockedWordMsg[2]).toBe(false);
     expect(blockedWordMsg[3]).toContain('blocked: prohibited content or domain pattern');
   });
+
+  it('streams upstream HPP/chunk protocol events to client without recording to D1', async () => {
+    const hppEvent = createSignedEvent(userPrivKey, {
+      kind: 1,
+      created_at: 1700000400,
+      tags: [
+        ['t', 'hpp'],
+        ['t', 'hpp-seed-v1'],
+        ['i', '1'],
+        ['n', '10'],
+      ],
+      content: JSON.stringify({
+        protocol: 'HPP_SEED/1',
+        chunk_index: 1,
+        chunk_count: 10,
+        data: 'QoPP9+1JmXMT...',
+      }),
+    });
+
+    session.setWebSocketFactory((url) => {
+      const mockWs = new MockClientWebSocket(url);
+      const origSend = mockWs.send.bind(mockWs);
+      mockWs.send = (data) => {
+        origSend(data);
+        const raw = typeof data === 'string' ? data : new TextDecoder().decode(data);
+        try {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed) && parsed[0] === 'REQ') {
+            const reqSubId = parsed[1] as string;
+            queueMicrotask(() => {
+              mockWs.simulateServerMessage(
+                JSON.stringify(['EVENT', reqSubId, hppEvent])
+              );
+              mockWs.simulateServerMessage(
+                JSON.stringify(['EOSE', reqSubId])
+              );
+            });
+          }
+        } catch {
+          // Ignore parse errors
+        }
+      };
+      return mockWs as unknown as WebSocket;
+    });
+
+    // Client requests notes
+    await session.webSocketMessage(
+      clientWs as unknown as WebSocket,
+      JSON.stringify(['REQ', 'sub1', { kinds: [1] }])
+    );
+
+    // 1. Client receives the EVENT message from upstream pass-through
+    const eventMsg = clientWs.sentMessages.find((m) => {
+      try {
+        const parsed = JSON.parse(m);
+        return parsed[0] === 'EVENT' && parsed[2]?.id === hppEvent.id;
+      } catch {
+        return false;
+      }
+    });
+    expect(eventMsg).toBeDefined();
+
+    // 2. Client receives EOSE
+    const eoseMsg = clientWs.sentMessages.find((m) => {
+      try {
+        const parsed = JSON.parse(m);
+        return parsed[0] === 'EOSE' && parsed[1] === 'sub1';
+      } catch {
+        return false;
+      }
+    });
+    expect(eoseMsg).toBeDefined();
+
+    // Wait a tick for async background persistence tasks
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // 3. Verify D1 database does NOT contain the HPP event
+    const d1Event = mockDb.events.get(hppEvent.id);
+    expect(d1Event).toBeUndefined();
+  });
+
+  it('streams upstream standard social notes to client AND records to D1', async () => {
+    const standardEvent = createSignedEvent(userPrivKey, {
+      kind: 1,
+      created_at: 1700000500,
+      tags: [['t', 'nostr']],
+      content: 'Standard social post on Nostr',
+    });
+
+    session.setWebSocketFactory((url) => {
+      const mockWs = new MockClientWebSocket(url);
+      const origSend = mockWs.send.bind(mockWs);
+      mockWs.send = (data) => {
+        origSend(data);
+        const raw = typeof data === 'string' ? data : new TextDecoder().decode(data);
+        try {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed) && parsed[0] === 'REQ') {
+            const reqSubId = parsed[1] as string;
+            queueMicrotask(() => {
+              mockWs.simulateServerMessage(
+                JSON.stringify(['EVENT', reqSubId, standardEvent])
+              );
+              mockWs.simulateServerMessage(
+                JSON.stringify(['EOSE', reqSubId])
+              );
+            });
+          }
+        } catch {
+          // Ignore parse errors
+        }
+      };
+      return mockWs as unknown as WebSocket;
+    });
+
+    await session.webSocketMessage(
+      clientWs as unknown as WebSocket,
+      JSON.stringify(['REQ', 'sub2', { kinds: [1] }])
+    );
+
+    const eventMsg = clientWs.sentMessages.find((m) => {
+      try {
+        const parsed = JSON.parse(m);
+        return parsed[0] === 'EVENT' && parsed[2]?.id === standardEvent.id;
+      } catch {
+        return false;
+      }
+    });
+    expect(eventMsg).toBeDefined();
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // D1 database MUST contain the standard event
+    const d1Event = mockDb.events.get(standardEvent.id);
+    expect(d1Event).toBeDefined();
+    expect(d1Event?.id).toBe(standardEvent.id);
+  });
 });

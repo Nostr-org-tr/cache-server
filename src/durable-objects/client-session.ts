@@ -25,6 +25,7 @@ import {
   createEmptyModerationRuleset,
   extractModerationRulesFromEvents,
   inspectEventModeration,
+  isRecordableEvent,
   type ModerationRuleset,
   RATE_LIMIT_DEFAULTS,
   SlidingWindowLimiter,
@@ -358,10 +359,11 @@ export class ClientSession extends DurableObject<Env> {
                   }
                 }
 
-                // Asynchronously persist newly pulled non-ephemeral, non-moderated events into D1/KV.
+                // Asynchronously persist newly pulled non-ephemeral, recordable events into D1/KV.
                 // Vector indexing for upstream events is safely handled via scheduled background backfill.
                 const isEphemeral = event.kind >= 20000 && event.kind < 30000;
-                if (!isEphemeral) {
+                const isRecordable = isRecordableEvent(event);
+                if (!isEphemeral && isRecordable) {
                   void saveEvent(this.env.DB, event)
                     .then(() => {
                       if (kv) {
@@ -477,8 +479,9 @@ export class ClientSession extends DurableObject<Env> {
         }
 
         const isEphemeral = event.kind >= 20000 && event.kind < 30000;
+        const isRecordable = isRecordableEvent(event);
 
-        if (!isEphemeral) {
+        if (!isEphemeral && isRecordable) {
           const kv = this.env.ENABLE_KV_CACHE === 'false' ? undefined : this.env.CACHE_KV;
           // Persist to D1 storage, in-memory cache, and selectively warm metadata in KV
           await saveEvent(this.env.DB, event);

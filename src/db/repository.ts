@@ -10,6 +10,7 @@ import {
   createEmptyModerationRuleset,
   extractModerationRulesFromEvents,
   inspectEventModeration,
+  inspectEventStoragePolicy,
   type ModerationRuleset,
 } from '../security';
 import { deleteEventVectors, executeSearch, indexEventsBatchVector } from '../search';
@@ -179,6 +180,12 @@ export async function saveEvent(db: D1Database, event: NostrEvent): Promise<Save
   const moderation = inspectEventModeration(event);
   if (!moderation.allowed) {
     return { action: 'ignored', id: event.id, reason: 'moderated_sensitive_or_blocked' };
+  }
+
+  // Storage policy check: drop unrecordable binary chunk protocols, encrypted text notes, and raw data dumps
+  const storagePolicy = inspectEventStoragePolicy(event);
+  if (!storagePolicy.recordable) {
+    return { action: 'ignored', id: event.id, reason: storagePolicy.reason || 'unrecordable_storage_policy' };
   }
 
   const category = classifyEventKind(event.kind);
@@ -497,6 +504,17 @@ export async function saveEventsBatch(
     const moderation = inspectEventModeration(event);
     if (!moderation.allowed) {
       results.push({ action: 'ignored', id: event.id, reason: 'moderated_sensitive_or_blocked' });
+      continue;
+    }
+
+    // Storage policy check: drop unrecordable binary chunk protocols, encrypted text notes, and raw data dumps
+    const storagePolicy = inspectEventStoragePolicy(event);
+    if (!storagePolicy.recordable) {
+      results.push({
+        action: 'ignored',
+        id: event.id,
+        reason: storagePolicy.reason || 'unrecordable_storage_policy',
+      });
       continue;
     }
 

@@ -226,13 +226,32 @@ async function main(): Promise<void> {
       }
       console.log(`\n  \x1b[32m✓ events cleared.\x1b[0m`);
     } else if (args.moderatedOnly) {
-      console.log(`\n🛡️  \x1b[1mExecuting Retroactive Moderation Purge (NIP-36 / NIP-32 / Mutes)...\x1b[0m`);
+      console.log(`\n🛡️  \x1b[1mExecuting Retroactive Moderation & Storage Policy Purge...\x1b[0m`);
       const purgeNip36Sql = `
         DELETE FROM event_tags WHERE event_id IN (
-          SELECT event_id FROM event_tags WHERE tag_name = 'content-warning' OR (tag_name = 'l' AND LOWER(tag_value) IN ('adult', 'porn', 'nsfw', 'nudity', 'sexual', 'gore', 'violence', 'illegal'))
+          SELECT event_id FROM event_tags WHERE tag_name = 'content-warning' 
+            OR (tag_name = 'l' AND LOWER(tag_value) IN ('adult', 'porn', 'nsfw', 'nudity', 'sexual', 'gore', 'violence', 'illegal'))
+            OR (tag_name = 't' AND (
+              LOWER(tag_value) IN ('hpp', 'hpp-seed', 'hpp-seed-v1', 'seed', 'file-chunk', 'packet-stream', 'torrent-chunk', 'blob-chunk', 'chunk-stream')
+              OR LOWER(tag_value) LIKE 'hpp-%'
+              OR LOWER(tag_value) LIKE 'hpp_%'
+            ))
+            OR tag_name IN ('chunk_index', 'chunk_count', 'packet_index')
         );
       `;
       executeD1Command(purgeNip36Sql, args.remote);
+
+      const purgeChunkProtocolsSql = `
+        DELETE FROM events WHERE kind = 1 AND (
+          raw_event LIKE '%"protocol":"HPP%'
+          OR raw_event LIKE '%"protocol": "HPP%'
+          OR raw_event LIKE '%"protocol":"hpp%'
+          OR raw_event LIKE '%"protocol": "hpp%'
+          OR raw_event LIKE '%"chunk_index"%'
+          OR raw_event LIKE '%?iv=%'
+        );
+      `;
+      executeD1Command(purgeChunkProtocolsSql, args.remote);
 
       const purgeEventsSql = `
         DELETE FROM events WHERE id NOT IN (SELECT DISTINCT event_id FROM event_tags) AND kind NOT IN (0, 3, 10000, 10002);
