@@ -8,6 +8,7 @@ import { queryEventsFallbackSearch } from './fallback';
 import { parseNip50Search } from './parser';
 import type { Nip50Extensions, SearchResultAuthor, SearchResultItem } from './types';
 import { queryVectorIndex } from './vector-store';
+import { computeHybridScore } from './scorer';
 
 /**
  * Computes direct njump.me URL for Nostr events and profiles.
@@ -91,8 +92,8 @@ export function matchesNip50Extensions(event: NostrEvent, extensions: Nip50Exten
 
 /**
  * Unified Search Query Engine.
- * Executes vector similarity search via Vectorize & Workers AI, hydating matching events from D1,
- * and falls back to parameterized SQLite keyword search if AI/Vectorize are not provisioned.
+ * Executes dual-source hybrid search combining Vectorize ANN semantic search and D1 parameterized SQL keyword search.
+ * Computes calibrated hybrid relevance scores and filters out low-similarity vector noise.
  */
 export async function executeSearch(
   db: D1Database,
@@ -111,60 +112,80 @@ export async function executeSearch(
   const vectorSearchEnabled = env.VECTOR_SEARCH_ENABLED !== 'false';
   const hasAiAndVectorize = Boolean(env.AI && env.VECTOR_INDEX && vectorSearchEnabled);
 
-  let candidateEventsWithScore: Array<{ event: NostrEvent; score: number; dTag?: string | undefined }> = [];
+  // 1. Dual-Source Candidate Retrieval
+  const vectorScoreMap = new Map<string, number>();
+  const candidateEventsMap = new Map<string, { event: NostrEvent; dTag?: string | undefined }>();
 
-  // 1. Execute Cloudflare Vectorize ANN search if bindings are active
-  if (hasAiAndVectorize && env.AI && env.VECTOR_INDEX) {
-    const vectorMatches = await queryVectorIndex(
-      env.AI,
-      env.VECTOR_INDEX,
-      parsed.cleanQuery,
-      requestedLimit * 2,
-      env.VECTOR_EMBEDDING_MODEL
-    );
-
-    if (vectorMatches.length > 0) {
-      const scoreMap = new Map<string, number>();
+  const vectorizePromise = (async () => {
+    if (hasAiAndVectorize && env.AI && env.VECTOR_INDEX) {
+      const vectorMatches = await queryVectorIndex(
+        env.AI,
+        env.VECTOR_INDEX,
+        parsed.cleanQuery,
+        requestedLimit * 3,
+        env.VECTOR_EMBEDDING_MODEL
+      );
       for (const m of vectorMatches) {
-        scoreMap.set(m.id, m.score);
+        vectorScoreMap.set(m.id, m.score);
       }
+      return vectorMatches.map((m) => m.id);
+    }
+    return [];
+  })();
 
-      const matchIds = vectorMatches.map((m) => m.id);
-      const placeholders = matchIds.map(() => '?').join(', ');
+  const sqlLexicalPromise = queryEventsFallbackSearch(db, filter, parsed, requestedLimit * 3);
 
-      const rows = await db
-        .prepare(
-          `SELECT id, pubkey, created_at, kind, d_tag, raw_event, created_at_recorded FROM events WHERE id IN (${placeholders})`
-        )
-        .bind(...matchIds)
-        .all<EventRow>();
+  const [vectorMatchIds, lexicalCandidates] = await Promise.all([vectorizePromise, sqlLexicalPromise]);
 
-      if (rows.results && Array.isArray(rows.results)) {
-        for (const row of rows.results) {
-          const event = rowToNostrEvent(row);
-          const score = scoreMap.get(event.id) ?? 0;
-          candidateEventsWithScore.push({
-            event,
-            score,
-            dTag: row.d_tag || undefined,
-          });
-        }
+  for (const cand of lexicalCandidates) {
+    const dTag = cand.event.tags.find((t) => Array.isArray(t) && t[0] === 'd')?.[1];
+    candidateEventsMap.set(cand.event.id, { event: cand.event, dTag });
+  }
+
+  // Hydrate missing candidate events from Vectorize ANN results
+  const missingIdsFromVector = vectorMatchIds.filter((id) => !candidateEventsMap.has(id));
+  if (missingIdsFromVector.length > 0) {
+    const placeholders = missingIdsFromVector.map(() => '?').join(', ');
+    const rows = await db
+      .prepare(
+        `SELECT id, pubkey, created_at, kind, d_tag, raw_event, created_at_recorded FROM events WHERE id IN (${placeholders})`
+      )
+      .bind(...missingIdsFromVector)
+      .all<EventRow>();
+
+    if (rows.results && Array.isArray(rows.results)) {
+      for (const row of rows.results) {
+        const event = rowToNostrEvent(row);
+        candidateEventsMap.set(event.id, {
+          event,
+          dTag: row.d_tag || undefined,
+        });
       }
-
-      // Preserve vector similarity score descending order
-      candidateEventsWithScore.sort((a, b) => b.score - a.score);
     }
   }
 
-  // 2. Fallback to SQL text search if vector search yielded no results or is unavailable
-  if (candidateEventsWithScore.length === 0) {
-    const fallbackResults = await queryEventsFallbackSearch(db, filter, parsed, requestedLimit * 2);
-    candidateEventsWithScore = fallbackResults.map((r) => ({
-      event: r.event,
-      score: r.score,
-      dTag: r.event.tags.find((t) => Array.isArray(t) && t[0] === 'd')?.[1],
-    }));
+  // 2. Compute Hybrid Relevance Scores & Filter Noise
+  const candidateEventsWithScore: Array<{ event: NostrEvent; score: number; dTag?: string | undefined }> = [];
+
+  for (const [id, cand] of candidateEventsMap.entries()) {
+    const rawVectorScore = vectorScoreMap.get(id);
+    const hybridScore = computeHybridScore(cand.event, parsed.cleanQuery, rawVectorScore);
+    if (hybridScore > 0) {
+      candidateEventsWithScore.push({
+        event: cand.event,
+        score: hybridScore,
+        dTag: cand.dTag,
+      });
+    }
   }
+
+  // Preserve hybrid score descending, breaking ties by created_at DESC
+  candidateEventsWithScore.sort((a, b) => {
+    if (b.score !== a.score) {
+      return b.score - a.score;
+    }
+    return b.event.created_at - a.event.created_at;
+  });
 
   // 3. Post-filter candidates against other filter constraints (kinds, authors, since, until, NIP-50 extensions)
   const filteredResults: SearchResultItem[] = [];

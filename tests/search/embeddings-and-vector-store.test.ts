@@ -5,7 +5,7 @@ import {
   generateEmbeddings,
   isSubstantiveText,
 } from '../../src/search/embeddings';
-import { buildNjumpUrl, extractAuthorMetadata } from '../../src/search/engine';
+import { buildNjumpUrl, executeSearch, extractAuthorMetadata } from '../../src/search/engine';
 import {
   deleteEventVectors,
   indexEventsBatchVector,
@@ -424,6 +424,130 @@ describe('Search Embeddings & Vector Store', () => {
       const vectors = [{ id: 'test-id', values: [0.1, 0.2], metadata: { kind: 1 } }];
       await expect(upsertVectorsWithRetry(mockVectorIndex, vectors, 1)).rejects.toThrow('FATAL_DATABASE_ERROR');
       expect(mockVectorIndex.upsert).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('executeSearch (Dual-Source Hybrid Search Engine)', () => {
+    it('ranks exact keyword match from D1 at top even if missing from Vectorize', async () => {
+      const emreEvent: NostrEvent = {
+        id: 'cf86126a74f8191b6d042eb7fe2cd976f0646ab04218c05c75cdd4f698d694ac',
+        pubkey: dummyPubkey,
+        created_at: 1789987053,
+        kind: 0,
+        tags: [],
+        content: JSON.stringify({
+          name: 'delirehberi',
+          display_name: 'Emre Yilmaz',
+          about: 'Building Nostr tools at https://nostr.emre.xyz',
+        }),
+        sig: 'f'.repeat(128),
+      };
+
+      const mockDb = {
+        prepare: vi.fn().mockReturnValue({
+          bind: vi.fn().mockReturnValue({
+            all: vi.fn().mockResolvedValue({
+              results: [
+                {
+                  id: emreEvent.id,
+                  pubkey: emreEvent.pubkey,
+                  created_at: emreEvent.created_at,
+                  kind: emreEvent.kind,
+                  d_tag: '',
+                  raw_event: JSON.stringify(emreEvent),
+                  created_at_recorded: emreEvent.created_at,
+                },
+              ],
+              success: true,
+            }),
+          }),
+        }),
+      } as unknown as D1Database;
+
+      const mockAi = {
+        run: vi.fn().mockResolvedValue({ data: [[0.1, 0.2]] }),
+      } as unknown as Ai;
+
+      // Vectorize returns no matches (e.g. event is only in D1)
+      const mockVectorIndex = {
+        query: vi.fn().mockResolvedValue({
+          count: 0,
+          matches: [],
+        }),
+      } as unknown as VectorizeIndex;
+
+      const env = {
+        DB: mockDb,
+        AI: mockAi,
+        VECTOR_INDEX: mockVectorIndex,
+        VECTOR_SEARCH_ENABLED: 'true',
+      } as unknown as import('../../src/types/env').Env;
+
+      const results = await executeSearch(mockDb, env, { search: 'emre' });
+      expect(results.length).toBe(1);
+      expect(results[0]?.event.id).toBe(emreEvent.id);
+      expect(results[0]?.score).toBeGreaterThanOrEqual(0.95);
+      expect(results[0]?.author?.displayName).toBe('Emre Yilmaz');
+    });
+
+    it('filters out Vectorize noise candidates with zero lexical match and low similarity', async () => {
+      const cringeEvent: NostrEvent = {
+        id: '548adce3286af7d10af757f5c50e8e65a020bb6f9c07069857b02da1eb86bb84',
+        pubkey: '32e1827635450ebb3c5a7d12c1f8e7b2b514439ac10a67eef3d9fd9c5c68e245',
+        created_at: 1790176920,
+        kind: 1,
+        tags: [],
+        content: 'ur cringe',
+        sig: 'f'.repeat(128),
+      };
+
+      const mockDb = {
+        prepare: vi.fn().mockReturnValue({
+          bind: vi.fn().mockReturnValue({
+            all: vi.fn().mockImplementation((..._args) => {
+              // D1 lexical search returns 0 results for "emre" on cringeEvent
+              // When querying WHERE id IN (cringeEvent.id) for vector hydration:
+              return Promise.resolve({
+                results: [
+                  {
+                    id: cringeEvent.id,
+                    pubkey: cringeEvent.pubkey,
+                    created_at: cringeEvent.created_at,
+                    kind: cringeEvent.kind,
+                    d_tag: '',
+                    raw_event: JSON.stringify(cringeEvent),
+                    created_at_recorded: cringeEvent.created_at,
+                  },
+                ],
+                success: true,
+              });
+            }),
+          }),
+        }),
+      } as unknown as D1Database;
+
+      const mockAi = {
+        run: vi.fn().mockResolvedValue({ data: [[0.1, 0.2]] }),
+      } as unknown as Ai;
+
+      // Vectorize returns cringe note with 0.43 score
+      const mockVectorIndex = {
+        query: vi.fn().mockResolvedValue({
+          count: 1,
+          matches: [{ id: cringeEvent.id, score: 0.43 }],
+        }),
+      } as unknown as VectorizeIndex;
+
+      const env = {
+        DB: mockDb,
+        AI: mockAi,
+        VECTOR_INDEX: mockVectorIndex,
+        VECTOR_SEARCH_ENABLED: 'true',
+      } as unknown as import('../../src/types/env').Env;
+
+      const results = await executeSearch(mockDb, env, { search: 'emre' });
+      // Cringe note with 0.43 vector score and 0 keyword match must be completely dropped
+      expect(results.length).toBe(0);
     });
   });
 });

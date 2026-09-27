@@ -9,7 +9,7 @@ const URL_REGEX = /https?:\/\/[^\s]+|nostr:[a-zA-Z0-9]+/gi;
  * Validates if the given text has sufficient substantive content for vector indexing.
  * Strips URLs, Nostr URIs, emojis, and symbols to ensure meaningful semantic searchability.
  */
-export function isSubstantiveText(text: string, minSubstantiveChars = 8): boolean {
+export function isSubstantiveText(text: string, minSubstantiveChars = 15): boolean {
   if (!text || typeof text !== 'string') {
     return false;
   }
@@ -22,7 +22,19 @@ export function isSubstantiveText(text: string, minSubstantiveChars = 8): boolea
 
   // Extract alphanumeric / letter / number characters (Unicode aware)
   const lettersAndDigits = textWithoutUrls.replace(/[^\p{L}\p{N}]/gu, '');
-  return lettersAndDigits.length >= minSubstantiveChars;
+  if (lettersAndDigits.length < minSubstantiveChars) {
+    return false;
+  }
+
+  // For general notes (default threshold >= 10), require either substantive length or at least 3 words
+  if (minSubstantiveChars >= 10) {
+    const words = textWithoutUrls.split(/\s+/).filter((w) => w.replace(/[^\p{L}\p{N}]/gu, '').length > 0);
+    if (words.length < 3 && lettersAndDigits.length < 24) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 /**
@@ -75,7 +87,7 @@ export function extractSearchableText(event: NostrEvent): string | null {
     // Kind 1: Short Text Note
     case 1: {
       const trimmed = event.content.trim();
-      if (!isSubstantiveText(trimmed, 8)) {
+      if (!isSubstantiveText(trimmed, 15)) {
         return null;
       }
       return trimmed.slice(0, MAX_EMBEDDING_TEXT_LENGTH);
@@ -106,7 +118,7 @@ export function extractSearchableText(event: NostrEvent): string | null {
       }
 
       const combined = parts.join('\n');
-      if (!isSubstantiveText(combined, 8)) {
+      if (!isSubstantiveText(combined, 10)) {
         return null;
       }
       return combined.slice(0, MAX_EMBEDDING_TEXT_LENGTH);
@@ -126,7 +138,7 @@ export function extractSearchableText(event: NostrEvent): string | null {
         }
       }
       const combined = parts.join(' | ');
-      if (!isSubstantiveText(combined, 8)) {
+      if (!isSubstantiveText(combined, 10)) {
         return null;
       }
       return combined.slice(0, MAX_EMBEDDING_TEXT_LENGTH);
@@ -135,7 +147,7 @@ export function extractSearchableText(event: NostrEvent): string | null {
     // Generic fallback for other persistent text kinds
     default: {
       const trimmed = event.content.trim();
-      if (!isSubstantiveText(trimmed, 8)) {
+      if (!isSubstantiveText(trimmed, 15)) {
         return null;
       }
       return trimmed.slice(0, MAX_EMBEDDING_TEXT_LENGTH);

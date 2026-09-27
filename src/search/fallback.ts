@@ -3,30 +3,23 @@ import type { EventRow } from '../db/types';
 import type { NostrEvent, NostrFilter } from '../types/nostr';
 import type { Nip50ParsedQuery } from './types';
 
+import { computeLexicalScore } from './scorer';
+
 /**
- * Computes a simple relevance match score (0.0 to 1.0) for a text query against event content.
+ * Computes a relevance match score (0.0 to 1.0) for a text query against event content.
  */
 export function calculateTextMatchScore(content: string, cleanQuery: string): number {
   if (!content || !cleanQuery) return 0;
-  const lowerContent = content.toLowerCase();
-  const lowerQuery = cleanQuery.toLowerCase();
-
-  // Exact phrase match
-  if (lowerContent.includes(lowerQuery)) {
-    return 0.95;
-  }
-
-  const terms = lowerQuery.split(/\s+/).filter((t) => t.length > 0);
-  if (terms.length === 0) return 0;
-
-  let matchedTerms = 0;
-  for (const term of terms) {
-    if (lowerContent.includes(term)) {
-      matchedTerms++;
-    }
-  }
-
-  return matchedTerms > 0 ? (matchedTerms / terms.length) * 0.8 : 0;
+  const dummyEvent: NostrEvent = {
+    id: '',
+    pubkey: '',
+    created_at: 0,
+    kind: 1,
+    tags: [],
+    content,
+    sig: '',
+  };
+  return computeLexicalScore(dummyEvent, cleanQuery);
 }
 
 /**
@@ -100,7 +93,7 @@ export async function queryEventsFallbackSearch(
 
   for (const row of results.results) {
     const event = rowToNostrEvent(row);
-    const score = calculateTextMatchScore(event.content, cleanQuery);
+    const score = computeLexicalScore(event, cleanQuery);
     if (score > 0) {
       scoredList.push({ event, score });
     }
