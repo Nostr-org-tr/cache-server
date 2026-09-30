@@ -25,15 +25,17 @@ import {
 import { renderDashboardHtml } from './renderer';
 import type { DashboardData } from './types';
 
-// KV key for the generated dashboard HTML
-const DASHBOARD_KV_KEY = 'dashboard:html';
+// KV cache keys
+export const DASHBOARD_KV_KEY = 'dashboard:html';
+export const SUMMARY_KV_KEY = 'stats:summary';
+export const STATS_KV_KEY = 'stats:json';
 
 // 2-hour expiration window — ensures stale pages are never served beyond 2 GC cycles
-const DASHBOARD_KV_TTL_SECONDS = 7200;
+export const DASHBOARD_KV_TTL_SECONDS = 7200;
 
 /**
- * Runs all dashboard queries concurrently, assembles the payload,
- * renders the HTML, and persists it to KV.
+ * Runs all dashboard queries in sequential steps to prevent D1 queue congestion,
+ * assembles the payload, renders the HTML, and persists it to KV.
  *
  * Individual query failures are caught internally by each query function,
  * returning empty/zero data. This function itself never throws.
@@ -47,37 +49,31 @@ export async function generateDashboard(env: Env): Promise<string | null> {
   const startMs = Date.now();
   const nowSeconds = Math.floor(startMs / 1000);
 
-  console.log('[Dashboard] Starting generation…');
+  console.log('[Dashboard] Starting sequential generation…');
 
   try {
-    // Run all independent queries concurrently
-    const [
-      summary,
-      hourlyTimeline,
-      hourOfDay,
-      dailyVolume,
-      kindDist,
-      ageBuckets,
-      topTags,
-      topClients,
-      topPosters,
-      topSharers,
-      mostFollowed,
-    ] = await Promise.all([
-      querySummary(env.DB),
-      queryHourlyTimeline(env.DB, nowSeconds),
-      queryHourOfDay(env.DB),
-      queryDailyVolume(env.DB, nowSeconds),
-      queryKindDistribution(env.DB),
-      queryAgeBuckets(env.DB, nowSeconds),
-      queryTopTags(env.DB),
-      queryTopClients(env.DB),
-      queryTopPosters(env.DB, nowSeconds),
-      queryTopSharers(env.DB, nowSeconds),
-      queryMostFollowed(env.DB),
-    ]);
+    // Phase 1: Core summary
+    const summary = await querySummary(env.DB);
 
-    // Hot 5 uses the hourlyTimeline result to build sparklines — runs after
+    // Phase 2: Activity Timelines & Volumes
+    const hourlyTimeline = await queryHourlyTimeline(env.DB, nowSeconds);
+    const dailyVolume = await queryDailyVolume(env.DB, nowSeconds);
+    const hourOfDay = await queryHourOfDay(env.DB);
+
+    // Phase 3: Distributions & Buckets
+    const kindDist = await queryKindDistribution(env.DB);
+    const ageBuckets = await queryAgeBuckets(env.DB, nowSeconds);
+
+    // Phase 4: Tags & Clients
+    const topTags = await queryTopTags(env.DB);
+    const topClients = await queryTopClients(env.DB);
+
+    // Phase 5: Account Leaderboards
+    const topPosters = await queryTopPosters(env.DB, nowSeconds);
+    const topSharers = await queryTopSharers(env.DB, nowSeconds);
+    const mostFollowed = await queryMostFollowed(env.DB);
+
+    // Phase 6: Hot 5 Trending (uses hourlyTimeline for sparklines)
     const hot5 = await queryHot5(env.DB, nowSeconds, hourlyTimeline);
 
     // Parse relay configuration from env
@@ -115,9 +111,14 @@ export async function generateDashboard(env: Env): Promise<string | null> {
     const htmlBytes = new TextEncoder().encode(html).byteLength;
 
     if (env.CACHE_KV) {
-      await env.CACHE_KV.put(DASHBOARD_KV_KEY, html, {
-        expirationTtl: DASHBOARD_KV_TTL_SECONDS,
-      });
+      await Promise.allSettled([
+        env.CACHE_KV.put(DASHBOARD_KV_KEY, html, {
+          expirationTtl: DASHBOARD_KV_TTL_SECONDS,
+        }),
+        env.CACHE_KV.put(SUMMARY_KV_KEY, JSON.stringify(summary), {
+          expirationTtl: DASHBOARD_KV_TTL_SECONDS,
+        }),
+      ]);
     }
 
     const durationMs = Date.now() - startMs;

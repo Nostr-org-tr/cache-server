@@ -281,122 +281,148 @@ export async function collectKvStats(kv?: KVNamespace): Promise<KvStats> {
   }
 }
 
+export const STATS_KV_KEY = 'stats:json';
+export const STATS_KV_TTL_SECONDS = 300; // 5 minutes cache
+
 /**
  * Handles `/stats` endpoint reporting cache statistics, database state, KV telemetry, and relay configuration.
+ * Leverages Cloudflare KV caching and D1 query batching to prevent database queue overload.
  */
-export async function handleStatsRequest(env: Env): Promise<Response> {
+export async function handleStatsRequest(env: Env, request?: Request): Promise<Response> {
   const now = Math.floor(Date.now() / 1000);
+
+  let forceRefresh = false;
+  if (request) {
+    try {
+      const url = new URL(request.url);
+      forceRefresh =
+        url.searchParams.get('refresh') === 'true' ||
+        url.searchParams.get('force') === '1' ||
+        url.searchParams.get('force') === 'true';
+    } catch {
+      // Non-fatal URL parse fallback
+    }
+  }
+
+  // 1. Try fast KV cache read if available and not forced
+  if (env.CACHE_KV && typeof env.CACHE_KV.get === 'function' && !forceRefresh) {
+    try {
+      const cached = await env.CACHE_KV.get(STATS_KV_KEY, 'json');
+      if (cached && typeof cached === 'object') {
+        return jsonResponse(cached, 200, {
+          'Cache-Control': 'public, max-age=60, stale-while-revalidate=300',
+        });
+      }
+    } catch (err) {
+      console.warn('[Stats] KV cache read failed, falling back to D1:', err);
+    }
+  }
 
   try {
     if (!env.DB) {
       throw new Error('Database binding (DB) is not configured');
     }
 
-    // 1. Total events
-    const eventsResult = await env.DB.prepare('SELECT COUNT(*) AS total FROM events').first<{
-      total: number;
-    }>();
-    const totalEvents = eventsResult?.total ?? 0;
-
-    // 2. Total tags
+    // Execute independent analytical queries in a single batched D1 roundtrip
+    let totalEvents = 0;
     let totalTags = 0;
-    try {
-      const tagsResult = await env.DB.prepare('SELECT COUNT(*) AS total FROM event_tags').first<{
-        total: number;
-      }>();
-      totalTags = tagsResult?.total ?? 0;
-    } catch {
-      // Non-fatal if tags table query fails
-    }
-
-    // 3. Total unique authors
     let totalAuthors = 0;
-    try {
-      const authorsResult = await env.DB.prepare(
-        'SELECT COUNT(DISTINCT pubkey) AS total FROM events'
-      ).first<{ total: number }>();
-      totalAuthors = authorsResult?.total ?? 0;
-    } catch {
-      // Non-fatal
-    }
-
-    // 4. Time range (oldest and newest created_at timestamps)
     let oldestEventAt: number | null = null;
     let newestEventAt: number | null = null;
-    try {
-      const rangeResult = await env.DB.prepare(
-        'SELECT MIN(created_at) AS oldest, MAX(created_at) AS newest FROM events'
-      ).first<{ oldest: number | null; newest: number | null }>();
-      if (rangeResult) {
-        oldestEventAt = rangeResult.oldest;
-        newestEventAt = rangeResult.newest;
-      }
-    } catch {
-      // Non-fatal
-    }
-
-    // 5. Kind distribution (top 20) with human-readable annotations
     let kindDistribution: KindDistribution[] = [];
-    try {
-      const distResult = await env.DB.prepare(
-        'SELECT kind, COUNT(*) AS count FROM events GROUP BY kind ORDER BY count DESC LIMIT 20'
-      ).all<{ kind: number; count: number }>();
-      if (distResult && Array.isArray(distResult.results)) {
-        kindDistribution = distResult.results.map((r) => ({
-          kind: r.kind,
-          name: getKindDescription(r.kind),
-          count: r.count,
-        }));
-      }
-    } catch {
-      // Non-fatal
-    }
-
-    // 5.1 Client distribution (top 15)
     let clientDistribution: ClientDistribution[] = [];
+    let indexedVectorsCount = 0;
+    let totalIndexableEvents = 0;
+
     try {
-      const clientDistResult = await env.DB.prepare(
-        `SELECT LOWER(TRIM(tag_value)) AS client, COUNT(*) AS count
-         FROM event_tags
-         WHERE tag_name = 'client' AND tag_value != ''
-         GROUP BY LOWER(TRIM(tag_value))
-         ORDER BY count DESC
-         LIMIT 15`
-      ).all<{ client: string; count: number }>();
-      if (clientDistResult && Array.isArray(clientDistResult.results)) {
-        clientDistribution = clientDistResult.results.map((r) => ({
-          client: formatClientName(r.client),
-          count: r.count,
-        }));
+      const batchRes = await env.DB.batch<
+        | { total: number }
+        | { oldest: number | null; newest: number | null }
+        | { kind: number; count: number }
+        | { client: string; count: number }
+      >([
+        // 0: Total events
+        env.DB.prepare('SELECT COUNT(*) AS total FROM events'),
+        // 1: Total tags
+        env.DB.prepare('SELECT COUNT(*) AS total FROM event_tags'),
+        // 2: Total unique authors
+        env.DB.prepare('SELECT COUNT(DISTINCT pubkey) AS total FROM events'),
+        // 3: Time range (Index-seek subqueries)
+        env.DB.prepare(
+          `SELECT
+             (SELECT created_at FROM events ORDER BY created_at ASC LIMIT 1) AS oldest,
+             (SELECT created_at FROM events ORDER BY created_at DESC LIMIT 1) AS newest`
+        ),
+        // 4: Kind distribution (top 20)
+        env.DB.prepare(
+          'SELECT kind, COUNT(*) AS count FROM events GROUP BY kind ORDER BY count DESC LIMIT 20'
+        ),
+        // 5: Client distribution (top 30 tags, aggregated in-memory)
+        env.DB.prepare(
+          `SELECT tag_value AS client, COUNT(*) AS count
+           FROM event_tags
+           WHERE tag_name = 'client' AND tag_value != ''
+           GROUP BY tag_value
+           ORDER BY count DESC
+           LIMIT 30`
+        ),
+        // 6: Indexed vectors count
+        env.DB.prepare('SELECT COUNT(*) AS total FROM events WHERE vector_indexed = 1'),
+        // 7: Total indexable events
+        env.DB.prepare('SELECT COUNT(*) AS total FROM events WHERE kind IN (0, 1, 30023, 9802)'),
+      ]);
+
+      const eventsRow = batchRes[0]?.results?.[0] as { total: number } | undefined;
+      totalEvents = eventsRow?.total ?? 0;
+
+      const tagsRow = batchRes[1]?.results?.[0] as { total: number } | undefined;
+      totalTags = tagsRow?.total ?? 0;
+
+      const authorsRow = batchRes[2]?.results?.[0] as { total: number } | undefined;
+      totalAuthors = authorsRow?.total ?? 0;
+
+      const rangeRow = batchRes[3]?.results?.[0] as
+        | { oldest: number | null; newest: number | null }
+        | undefined;
+      if (rangeRow) {
+        oldestEventAt = rangeRow.oldest ?? null;
+        newestEventAt = rangeRow.newest ?? null;
       }
-    } catch {
-      // Non-fatal
+
+      const kindRows = (batchRes[4]?.results ?? []) as Array<{ kind: number; count: number }>;
+      kindDistribution = kindRows.map((r) => ({
+        kind: r.kind,
+        name: getKindDescription(r.kind),
+        count: r.count,
+      }));
+
+      const clientRows = (batchRes[5]?.results ?? []) as Array<{ client: string; count: number }>;
+      const clientMap = new Map<string, number>();
+      for (const r of clientRows) {
+        const formatted = formatClientName(r.client);
+        clientMap.set(formatted, (clientMap.get(formatted) || 0) + r.count);
+      }
+      clientDistribution = Array.from(clientMap.entries())
+        .map(([client, count]) => ({ client, count }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 15);
+
+      const vectorRow = batchRes[6]?.results?.[0] as { total: number } | undefined;
+      indexedVectorsCount = vectorRow?.total ?? 0;
+
+      const indexableRow = batchRes[7]?.results?.[0] as { total: number } | undefined;
+      totalIndexableEvents = indexableRow?.total ?? 0;
+    } catch (d1Err) {
+      console.warn('[Stats] Batched D1 query failed, checking for fallback:', d1Err);
+      // If error is DB down/failure on initial run without any data, propagate
+      if (!env.CACHE_KV) {
+        throw d1Err;
+      }
     }
 
-    // 6. Collect KV Cache Telemetry (if enabled)
+    // Collect KV Cache Telemetry (if enabled)
     const kvBinding = env.ENABLE_KV_CACHE === 'false' ? undefined : env.CACHE_KV;
     const kvStats = await collectKvStats(kvBinding);
-
-    // 6.1 Collect Vector Search Telemetry
-    let indexedVectorsCount = 0;
-    try {
-      const vResult = await env.DB.prepare(
-        'SELECT COUNT(*) AS total FROM events WHERE vector_indexed = 1'
-      ).first<{ total: number }>();
-      indexedVectorsCount = vResult?.total ?? 0;
-    } catch {
-      // Non-fatal if column not yet queried
-    }
-
-    let totalIndexableEvents = 0;
-    try {
-      const idxResult = await env.DB.prepare(
-        'SELECT COUNT(*) AS total FROM events WHERE kind IN (0, 1, 30023, 9802)'
-      ).first<{ total: number }>();
-      totalIndexableEvents = idxResult?.total ?? 0;
-    } catch {
-      // Non-fatal
-    }
 
     const vectorEnabled = env.VECTOR_SEARCH_ENABLED !== 'false';
     const vectorStatus: 'active' | 'disabled' | 'unconfigured' =
@@ -415,14 +441,14 @@ export async function handleStatsRequest(env: Env): Promise<Response> {
       metric: 'cosine',
     };
 
-    // 7. Parse configured upstreams
+    // Parse configured upstreams
     const upstreamRelays = env.UPSTREAM_RELAYS
       ? env.UPSTREAM_RELAYS.split(',').map((u) => u.trim()).filter(Boolean)
       : DEFAULT_UPSTREAM_RELAYS;
 
     const timeoutMs = parseInt(env.UPSTREAM_TIMEOUT_MS || '5000', 10);
 
-    // 8. Rate Limits & Security Configuration
+    // Rate Limits & Security Configuration
     const ipHandshakeLimit = env.RATE_LIMIT_IP_HANDSHAKE_PER_MIN
       ? parseInt(env.RATE_LIMIT_IP_HANDSHAKE_PER_MIN, 10)
       : RATE_LIMIT_DEFAULTS.IP_HANDSHAKE_LIMIT;
@@ -485,8 +511,24 @@ export async function handleStatsRequest(env: Env): Promise<Response> {
       },
     };
 
+    // Store in KV cache for subsequent requests
+    if (env.CACHE_KV && typeof env.CACHE_KV.put === 'function') {
+      try {
+        const putPromise = env.CACHE_KV.put(STATS_KV_KEY, JSON.stringify(payload), {
+          expirationTtl: STATS_KV_TTL_SECONDS,
+        });
+        if (putPromise && typeof putPromise.catch === 'function') {
+          putPromise.catch((err) => {
+            console.warn('[Stats] Failed to persist stats to KV:', err);
+          });
+        }
+      } catch (err) {
+        console.warn('[Stats] Failed to invoke KV put:', err);
+      }
+    }
+
     return jsonResponse(payload, 200, {
-      'Cache-Control': 'public, max-age=60',
+      'Cache-Control': 'public, max-age=60, stale-while-revalidate=300',
     });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);

@@ -28,14 +28,45 @@ export async function handleLandingRequest(
   let totalTags: number | undefined;
   let indexedVectors: number | undefined;
 
-  // Attempt fast summary query from D1
-  if (env.DB) {
+  // 1. Attempt fast summary read from KV cache
+  let summaryLoaded = false;
+  if (env.CACHE_KV) {
+    try {
+      const cached = await env.CACHE_KV.get('stats:summary', 'json');
+      if (cached && typeof cached === 'object') {
+        const s = cached as {
+          total_events?: number;
+          total_authors?: number;
+          total_tags?: number;
+          indexed_vectors?: number;
+        };
+        totalEvents = s.total_events;
+        totalAuthors = s.total_authors;
+        totalTags = s.total_tags;
+        indexedVectors = s.indexed_vectors;
+        summaryLoaded = true;
+      }
+    } catch (err) {
+      console.warn('[Landing] KV summary cache read failed:', err);
+    }
+  }
+
+  // 2. Fallback to live D1 query if not in KV
+  if (!summaryLoaded && env.DB) {
     try {
       const summary = await querySummary(env.DB);
       totalEvents = summary.total_events;
       totalAuthors = summary.total_authors;
       totalTags = summary.total_tags;
       indexedVectors = summary.indexed_vectors;
+
+      if (env.CACHE_KV) {
+        env.CACHE_KV.put('stats:summary', JSON.stringify(summary), {
+          expirationTtl: 300,
+        }).catch((err) => {
+          console.warn('[Landing] Failed to save summary to KV:', err);
+        });
+      }
     } catch (err) {
       console.warn('[Landing] Failed to query live summary stats from D1:', err);
     }

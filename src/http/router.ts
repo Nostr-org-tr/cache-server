@@ -89,7 +89,7 @@ export async function handleHttpRequest(
         return handleHealthRequest(env);
       }
       case '/stats': {
-        return handleStatsRequest(env);
+        return handleStatsRequest(env, request);
       }
       case '/dashboard': {
         return handleDashboardRequest(request, env, _ctx);

@@ -226,7 +226,7 @@ describe('HTTP /stats Endpoint', () => {
     expect(stats.keys_by_prefix.profiles).toBe(1);
   });
 
-  it('should return HTTP 500 if database fails', async () => {
+  it('should return HTTP 500 if database fails and no KV cache exists', async () => {
     const faultyDb = {
       prepare: () => {
         throw new Error('Database down');
@@ -243,5 +243,90 @@ describe('HTTP /stats Endpoint', () => {
 
     const json = (await response.json()) as { error: string; message: string };
     expect(json.error).toBe('Failed to retrieve relay statistics');
+  });
+
+  it('should return fast cached response from KV without querying D1', async () => {
+    let d1Queried = false;
+    const trackingDb = {
+      prepare: () => {
+        d1Queried = true;
+        throw new Error('Should not be called on KV cache hit');
+      },
+      batch: () => {
+        d1Queried = true;
+        throw new Error('Should not be called on KV cache hit');
+      },
+    } as unknown as D1Database;
+
+    const mockKv = new MockKVNamespace();
+    const cachedStats: Partial<RelayStatsResponse> = {
+      service: 'cache.nostr.org.tr',
+      version: APP_VERSION,
+      timestamp: 123456789,
+      cache: {
+        total_events: 500,
+        total_tags: 1200,
+        total_authors: 150,
+        time_range: { oldest_event_at: 1000, newest_event_at: 2000 },
+        kind_distribution: [],
+        client_distribution: [],
+      },
+    };
+    await mockKv.put('stats:json', JSON.stringify(cachedStats));
+
+    const env: Env = {
+      DB: trackingDb,
+      CACHE_KV: mockKv as unknown as KVNamespace,
+      CLIENT_SESSION: {} as unknown as DurableObjectNamespace<any>,
+    };
+
+    const response = await handleStatsRequest(env);
+    expect(response.status).toBe(200);
+    expect(d1Queried).toBe(false);
+
+    const json = (await response.json()) as RelayStatsResponse;
+    expect(json.service).toBe('cache.nostr.org.tr');
+    expect(json.cache.total_events).toBe(500);
+  });
+
+  it('should bypass KV cache when force refresh query parameter is present', async () => {
+    const mockDb = new MockD1Database();
+    mockDb.events.set('e1', {
+      id: 'e1',
+      pubkey: 'p1',
+      created_at: 1000,
+      kind: 1,
+      d_tag: null,
+      raw_event: '{}',
+      created_at_recorded: 1000,
+    });
+
+    const mockKv = new MockKVNamespace();
+    const staleStats: Partial<RelayStatsResponse> = {
+      service: 'cache.nostr.org.tr',
+      version: APP_VERSION,
+      cache: {
+        total_events: 99999,
+        total_tags: 0,
+        total_authors: 0,
+        time_range: { oldest_event_at: null, newest_event_at: null },
+        kind_distribution: [],
+        client_distribution: [],
+      },
+    };
+    await mockKv.put('stats:json', JSON.stringify(staleStats));
+
+    const env: Env = {
+      DB: mockDb as unknown as D1Database,
+      CACHE_KV: mockKv as unknown as KVNamespace,
+      CLIENT_SESSION: {} as unknown as DurableObjectNamespace<any>,
+    };
+
+    const request = new Request('https://cache.nostr.org.tr/stats?refresh=true');
+    const response = await handleStatsRequest(env, request);
+    expect(response.status).toBe(200);
+
+    const json = (await response.json()) as RelayStatsResponse;
+    expect(json.cache.total_events).toBe(1); // Fresh from DB, not stale 99999 from KV
   });
 });

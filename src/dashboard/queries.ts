@@ -61,7 +61,11 @@ export async function querySummary(db: D1Database): Promise<DashboardSummary> {
       db.prepare('SELECT COUNT(DISTINCT pubkey) AS total FROM events'),
       db.prepare('SELECT COUNT(*) AS total FROM event_tags'),
       db.prepare('SELECT COUNT(*) AS total FROM events WHERE vector_indexed = 1'),
-      db.prepare('SELECT MIN(created_at) AS oldest, MAX(created_at) AS newest FROM events'),
+      db.prepare(
+        `SELECT
+           (SELECT created_at FROM events ORDER BY created_at ASC LIMIT 1) AS oldest,
+           (SELECT created_at FROM events ORDER BY created_at DESC LIMIT 1) AS newest`
+      ),
     ]);
 
     const events = batchResults[0]?.results?.[0] as { total: number } | undefined;
@@ -80,7 +84,8 @@ export async function querySummary(db: D1Database): Promise<DashboardSummary> {
       oldest_event_at: range?.oldest ?? null,
       newest_event_at: range?.newest ?? null,
     };
-  } catch {
+  } catch (err) {
+    console.warn('[Dashboard] querySummary failed:', err);
     return {
       total_events: 0,
       total_authors: 0,
@@ -114,7 +119,8 @@ export async function queryHourlyTimeline(
       .bind(since, ...values)
       .all<{ hour_bucket: number; count: number }>();
     return result.results ?? [];
-  } catch {
+  } catch (err) {
+    console.warn('[Dashboard] queryHourlyTimeline failed:', err);
     return [];
   }
 }
@@ -134,7 +140,8 @@ export async function queryHourOfDay(db: D1Database): Promise<HourOfDay[]> {
       )
       .all<{ hour_of_day: number; count: number }>();
     return result.results ?? [];
-  } catch {
+  } catch (err) {
+    console.warn('[Dashboard] queryHourOfDay failed:', err);
     return [];
   }
 }
@@ -161,7 +168,8 @@ export async function queryDailyVolume(
       .bind(since, ...values)
       .all<{ day_bucket: number; count: number }>();
     return result.results ?? [];
-  } catch {
+  } catch (err) {
+    console.warn('[Dashboard] queryDailyVolume failed:', err);
     return [];
   }
 }
@@ -186,13 +194,14 @@ export async function queryKindDistribution(db: D1Database): Promise<KindEntry[]
       name: getKindDescription(r.kind),
       count: r.count,
     }));
-  } catch {
+  } catch (err) {
+    console.warn('[Dashboard] queryKindDistribution failed:', err);
     return [];
   }
 }
 
 // ---------------------------------------------------------------------------
-// Section B5 — Event Age Distribution (5 buckets, batched)
+// Section B5 — Event Age Distribution (Single-Pass Conditional Aggregation)
 // ---------------------------------------------------------------------------
 
 export async function queryAgeBuckets(
@@ -206,30 +215,35 @@ export async function queryAgeBuckets(
   const t7d = nowSeconds - SEVEN_DAYS_S;
 
   try {
-    const ageBatch = await db.batch<{ count: number }>([
-      db.prepare(`SELECT COUNT(*) AS count FROM events WHERE created_at >= ?`).bind(t1h),
-      db
-        .prepare(`SELECT COUNT(*) AS count FROM events WHERE created_at >= ? AND created_at < ?`)
-        .bind(t6h, t1h),
-      db
-        .prepare(`SELECT COUNT(*) AS count FROM events WHERE created_at >= ? AND created_at < ?`)
-        .bind(t24h, t6h),
-      db
-        .prepare(`SELECT COUNT(*) AS count FROM events WHERE created_at >= ? AND created_at < ?`)
-        .bind(t3d, t24h),
-      db
-        .prepare(`SELECT COUNT(*) AS count FROM events WHERE created_at >= ? AND created_at < ?`)
-        .bind(t7d, t3d),
-    ]);
+    const row = await db
+      .prepare(
+        `SELECT
+           COALESCE(SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END), 0) AS lt1h,
+           COALESCE(SUM(CASE WHEN created_at >= ? AND created_at < ? THEN 1 ELSE 0 END), 0) AS h1to6,
+           COALESCE(SUM(CASE WHEN created_at >= ? AND created_at < ? THEN 1 ELSE 0 END), 0) AS h6to24,
+           COALESCE(SUM(CASE WHEN created_at >= ? AND created_at < ? THEN 1 ELSE 0 END), 0) AS d1to3,
+           COALESCE(SUM(CASE WHEN created_at >= ? AND created_at < ? THEN 1 ELSE 0 END), 0) AS d3to7
+         FROM events
+         WHERE created_at >= ?`
+      )
+      .bind(t1h, t6h, t1h, t24h, t6h, t3d, t24h, t7d, t3d, t7d)
+      .first<{
+        lt1h: number;
+        h1to6: number;
+        h6to24: number;
+        d1to3: number;
+        d3to7: number;
+      }>();
 
     return {
-      lt1h: (ageBatch[0]?.results?.[0] as { count: number } | undefined)?.count ?? 0,
-      h1to6: (ageBatch[1]?.results?.[0] as { count: number } | undefined)?.count ?? 0,
-      h6to24: (ageBatch[2]?.results?.[0] as { count: number } | undefined)?.count ?? 0,
-      d1to3: (ageBatch[3]?.results?.[0] as { count: number } | undefined)?.count ?? 0,
-      d3to7: (ageBatch[4]?.results?.[0] as { count: number } | undefined)?.count ?? 0,
+      lt1h: row?.lt1h ?? 0,
+      h1to6: row?.h1to6 ?? 0,
+      h6to24: row?.h6to24 ?? 0,
+      d1to3: row?.d1to3 ?? 0,
+      d3to7: row?.d3to7 ?? 0,
     };
-  } catch {
+  } catch (err) {
+    console.warn('[Dashboard] queryAgeBuckets failed:', err);
     return { lt1h: 0, h1to6: 0, h6to24: 0, d1to3: 0, d3to7: 0 };
   }
 }
@@ -251,7 +265,8 @@ export async function queryTopTags(db: D1Database): Promise<TagEntry[]> {
       )
       .all<{ tag_name: string; count: number }>();
     return result.results ?? [];
-  } catch {
+  } catch (err) {
+    console.warn('[Dashboard] queryTopTags failed:', err);
     return [];
   }
 }
@@ -318,44 +333,88 @@ export async function queryTopClients(db: D1Database): Promise<ClientEntry[]> {
   try {
     const result = await db
       .prepare(
-        `SELECT LOWER(TRIM(tag_value)) AS client, COUNT(*) AS count
+        `SELECT tag_value AS client, COUNT(*) AS count
          FROM event_tags
          WHERE tag_name = 'client' AND tag_value != ''
-         GROUP BY LOWER(TRIM(tag_value))
+         GROUP BY tag_value
          ORDER BY count DESC
-         LIMIT 15`
+         LIMIT 30`
       )
       .all<{ client: string; count: number }>();
-    return (result.results ?? []).map((r) => ({
-      client: formatClientName(r.client),
-      count: r.count,
-    }));
-  } catch {
+
+    // Normalize and aggregate in memory to prevent expensive SQL functions
+    const clientMap = new Map<string, number>();
+    for (const r of result.results ?? []) {
+      const formatted = formatClientName(r.client);
+      clientMap.set(formatted, (clientMap.get(formatted) || 0) + r.count);
+    }
+
+    return Array.from(clientMap.entries())
+      .map(([client, count]) => ({ client, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 15);
+  } catch (err) {
+    console.warn('[Dashboard] queryTopClients failed:', err);
     return [];
   }
 }
 
 // ---------------------------------------------------------------------------
-// Shared leaderboard SQL helper
+// Shared Profile Resolver Helper (Decoupled Batch Lookup)
 // ---------------------------------------------------------------------------
 
-/**
- * Profile name resolution expression using SQLite json_extract.
- * Kind 0 raw_event has the structure: {"content":"{\"name\":\"...\"}"}
- * content is a JSON string inside the outer JSON, requiring double extraction.
- */
-function profileNameExpr(profileAlias: string): string {
-  return `COALESCE(
-    NULLIF(json_extract(json_extract(${profileAlias}.raw_event, '$.content'), '$.display_name'), ''),
-    NULLIF(json_extract(json_extract(${profileAlias}.raw_event, '$.content'), '$.name'), '')
-  )`;
+export interface ProfileInfo {
+  display_name: string | null;
+  avatar_url: string | null;
 }
 
 /**
- * Profile avatar extraction expression using SQLite json_extract.
+ * Batch resolves kind 0 display names and avatars for a list of pubkeys.
+ * Avoids expensive SQLite table joins and runtime json_extract over millions of rows.
  */
-function profileAvatarExpr(profileAlias: string): string {
-  return `NULLIF(json_extract(json_extract(${profileAlias}.raw_event, '$.content'), '$.picture'), '')`;
+export async function resolveProfiles(
+  db: D1Database,
+  pubkeys: readonly string[]
+): Promise<Map<string, ProfileInfo>> {
+  const profileMap = new Map<string, ProfileInfo>();
+  const uniquePubkeys = Array.from(new Set(pubkeys.filter(Boolean)));
+  if (uniquePubkeys.length === 0) return profileMap;
+
+  const placeholders = uniquePubkeys.map(() => '?').join(', ');
+  try {
+    const result = await db
+      .prepare(
+        `SELECT pubkey, raw_event
+         FROM events
+         WHERE kind = 0 AND pubkey IN (${placeholders})`
+      )
+      .bind(...uniquePubkeys)
+      .all<{ pubkey: string; raw_event: string }>();
+
+    for (const row of result.results ?? []) {
+      try {
+        const raw = typeof row.raw_event === 'string' ? JSON.parse(row.raw_event) : row.raw_event;
+        const content = typeof raw?.content === 'string' ? JSON.parse(raw.content) : raw?.content;
+        const displayName =
+          (content?.display_name && String(content.display_name).trim()) ||
+          (content?.name && String(content.name).trim()) ||
+          null;
+        const avatarUrl =
+          (content?.picture && String(content.picture).trim()) || null;
+
+        profileMap.set(row.pubkey, {
+          display_name: displayName,
+          avatar_url: avatarUrl,
+        });
+      } catch {
+        // Non-fatal if single profile content parse fails
+      }
+    }
+  } catch (err) {
+    console.warn('[Dashboard] resolveProfiles batch query failed:', err);
+  }
+
+  return profileMap;
 }
 
 // ---------------------------------------------------------------------------
@@ -370,27 +429,33 @@ export async function queryTopPosters(
   try {
     const result = await db
       .prepare(
-        `SELECT
-           e.pubkey,
-           COUNT(*) AS count,
-           ${profileNameExpr('p')} AS display_name,
-           ${profileAvatarExpr('p')} AS avatar_url
-         FROM events e
-         LEFT JOIN events p ON p.pubkey = e.pubkey AND p.kind = 0
-         WHERE e.kind = 1 AND e.created_at >= ?
-         GROUP BY e.pubkey
+        `SELECT pubkey, COUNT(*) AS count
+         FROM events
+         WHERE kind = 1 AND created_at >= ?
+         GROUP BY pubkey
          ORDER BY count DESC
          LIMIT 10`
       )
       .bind(since)
-      .all<{ pubkey: string; count: number; display_name: string | null; avatar_url: string | null }>();
-    return (result.results ?? []).map((r) => ({
-      pubkey: r.pubkey,
-      count: r.count,
-      display_name: (r.display_name && r.display_name.trim()) || shortenNpub(r.pubkey),
-      avatar_url: r.avatar_url ?? null,
-    }));
-  } catch {
+      .all<{ pubkey: string; count: number }>();
+
+    const rows = result.results ?? [];
+    if (rows.length === 0) return [];
+
+    const pubkeys = rows.map((r) => r.pubkey);
+    const profiles = await resolveProfiles(db, pubkeys);
+
+    return rows.map((r) => {
+      const prof = profiles.get(r.pubkey);
+      return {
+        pubkey: r.pubkey,
+        count: r.count,
+        display_name: prof?.display_name || shortenNpub(r.pubkey),
+        avatar_url: prof?.avatar_url ?? null,
+      };
+    });
+  } catch (err) {
+    console.warn('[Dashboard] queryTopPosters failed:', err);
     return [];
   }
 }
@@ -407,27 +472,33 @@ export async function queryTopSharers(
   try {
     const result = await db
       .prepare(
-        `SELECT
-           e.pubkey,
-           COUNT(*) AS count,
-           ${profileNameExpr('p')} AS display_name,
-           ${profileAvatarExpr('p')} AS avatar_url
-         FROM events e
-         LEFT JOIN events p ON p.pubkey = e.pubkey AND p.kind = 0
-         WHERE e.kind IN (6, 16) AND e.created_at >= ?
-         GROUP BY e.pubkey
+        `SELECT pubkey, COUNT(*) AS count
+         FROM events
+         WHERE kind IN (6, 16) AND created_at >= ?
+         GROUP BY pubkey
          ORDER BY count DESC
          LIMIT 10`
       )
       .bind(since)
-      .all<{ pubkey: string; count: number; display_name: string | null; avatar_url: string | null }>();
-    return (result.results ?? []).map((r) => ({
-      pubkey: r.pubkey,
-      count: r.count,
-      display_name: (r.display_name && r.display_name.trim()) || shortenNpub(r.pubkey),
-      avatar_url: r.avatar_url ?? null,
-    }));
-  } catch {
+      .all<{ pubkey: string; count: number }>();
+
+    const rows = result.results ?? [];
+    if (rows.length === 0) return [];
+
+    const pubkeys = rows.map((r) => r.pubkey);
+    const profiles = await resolveProfiles(db, pubkeys);
+
+    return rows.map((r) => {
+      const prof = profiles.get(r.pubkey);
+      return {
+        pubkey: r.pubkey,
+        count: r.count,
+        display_name: prof?.display_name || shortenNpub(r.pubkey),
+        avatar_url: prof?.avatar_url ?? null,
+      };
+    });
+  } catch (err) {
+    console.warn('[Dashboard] queryTopSharers failed:', err);
     return [];
   }
 }
@@ -440,27 +511,32 @@ export async function queryMostFollowed(db: D1Database): Promise<AccountLeaderEn
   try {
     const result = await db
       .prepare(
-        `SELECT
-           t.tag_value AS pubkey,
-           COUNT(DISTINCT e.pubkey) AS count,
-           ${profileNameExpr('p')} AS display_name,
-           ${profileAvatarExpr('p')} AS avatar_url
-         FROM event_tags t
-         JOIN events e ON t.event_id = e.id AND e.kind = 3
-         LEFT JOIN events p ON p.pubkey = t.tag_value AND p.kind = 0
-         WHERE t.tag_name = 'p'
-         GROUP BY t.tag_value
+        `SELECT tag_value AS pubkey, COUNT(*) AS count
+         FROM event_tags
+         WHERE tag_name = 'p'
+         GROUP BY tag_value
          ORDER BY count DESC
          LIMIT 10`
       )
-      .all<{ pubkey: string; count: number; display_name: string | null; avatar_url: string | null }>();
-    return (result.results ?? []).map((r) => ({
-      pubkey: r.pubkey,
-      count: r.count,
-      display_name: (r.display_name && r.display_name.trim()) || shortenNpub(r.pubkey),
-      avatar_url: r.avatar_url ?? null,
-    }));
-  } catch {
+      .all<{ pubkey: string; count: number }>();
+
+    const rows = result.results ?? [];
+    if (rows.length === 0) return [];
+
+    const pubkeys = rows.map((r) => r.pubkey);
+    const profiles = await resolveProfiles(db, pubkeys);
+
+    return rows.map((r) => {
+      const prof = profiles.get(r.pubkey);
+      return {
+        pubkey: r.pubkey,
+        count: r.count,
+        display_name: prof?.display_name || shortenNpub(r.pubkey),
+        avatar_url: prof?.avatar_url ?? null,
+      };
+    });
+  } catch (err) {
+    console.warn('[Dashboard] queryMostFollowed failed:', err);
     return [];
   }
 }
@@ -609,32 +685,10 @@ export async function queryHot5(
     }
 
     // Resolve display names & avatars for top 5 in a single batch
-    const nameStmts = top5.map((c) =>
-      db
-        .prepare(
-          `SELECT
-             ${profileNameExpr('e')} AS display_name,
-             ${profileAvatarExpr('e')} AS avatar_url
-           FROM events e
-           WHERE e.pubkey = ? AND e.kind = 0
-           LIMIT 1`
-        )
-        .bind(c.pubkey)
-    );
-
-    let nameResults: Array<{ display_name: string | null; avatar_url: string | null } | undefined> = [];
-    try {
-      const nameBatch = await db.batch<{ display_name: string | null; avatar_url: string | null }>(nameStmts);
-      nameResults = nameBatch.map(
-        (r) => r.results[0] as { display_name: string | null; avatar_url: string | null } | undefined
-      );
-    } catch {
-      // Non-fatal — fall back to npub abbreviation
-    }
+    const top5Pubkeys = top5.map((c) => c.pubkey);
+    const profiles = await resolveProfiles(db, top5Pubkeys);
 
     // Build sparklines from the already-fetched hourlyTimeline for these pubkeys.
-    // The hourlyTimeline is an aggregated view (all pubkeys combined), so we run
-    // per-pubkey sparkline queries only for the 5 winners to keep query count low.
     const sparklineStmts = top5.map((c) =>
       db
         .prepare(
@@ -650,8 +704,8 @@ export async function queryHot5(
     let sparklineResults: Array<{ results: Array<{ hour_bucket: number; count: number }> }> = [];
     try {
       sparklineResults = await db.batch<{ hour_bucket: number; count: number }>(sparklineStmts);
-    } catch {
-      // Non-fatal
+    } catch (err) {
+      console.warn('[Dashboard] queryHot5 sparkline batch query failed:', err);
     }
 
     // Build a complete 168-slot hour array (last 7 days) for consistent sparkline width
@@ -659,10 +713,9 @@ export async function queryHot5(
     const totalHours = 168;
 
     return top5.map((c, i) => {
-      const nameRow = nameResults[i];
-      const display_name =
-        (nameRow?.display_name && nameRow.display_name.trim()) || shortenNpub(c.pubkey);
-      const avatar_url = nameRow?.avatar_url ?? null;
+      const prof = profiles.get(c.pubkey);
+      const display_name = prof?.display_name || shortenNpub(c.pubkey);
+      const avatar_url = prof?.avatar_url ?? null;
 
       const sparklineRows: Array<{ hour_bucket: number; count: number }> =
         sparklineResults[i]?.results ?? [];
@@ -689,7 +742,8 @@ export async function queryHot5(
         sparkline,
       };
     });
-  } catch {
+  } catch (err) {
+    console.warn('[Dashboard] queryHot5 failed:', err);
     return [];
   }
 }

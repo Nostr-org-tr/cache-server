@@ -84,7 +84,7 @@ export class MockD1PreparedStatement implements D1PreparedStatement {
   }
 
   async all<T = Record<string, unknown>>(): Promise<D1Result<T>> {
-    const q = this.query.trim();
+    const q = this.query.trim().replace(/\s+/g, ' ');
 
     // Query 0: SELECT 1 AS alive
     if (q.includes('SELECT 1 AS alive') || q === 'SELECT 1' || q.startsWith('SELECT 1 AS')) {
@@ -133,8 +133,12 @@ export class MockD1PreparedStatement implements D1PreparedStatement {
       };
     }
 
-    // Query 0.26: SELECT MIN(created_at) AS oldest, MAX(created_at) AS newest FROM events
-    if (q.includes('MIN(created_at)') || q.includes('MAX(created_at)')) {
+    // Query 0.26: SELECT MIN(created_at) AS oldest, MAX(created_at) AS newest FROM events (or subquery form)
+    if (
+      q.includes('MIN(created_at)') ||
+      q.includes('MAX(created_at)') ||
+      (q.includes('AS oldest') && q.includes('AS newest'))
+    ) {
       const allEvents = Array.from(this.db.events.values());
       let oldest: number | null = null;
       let newest: number | null = null;
@@ -236,7 +240,40 @@ export class MockD1PreparedStatement implements D1PreparedStatement {
       };
     }
 
-    // Dashboard B5: Age buckets count queries
+    // Dashboard B5: Age buckets conditional sum query
+    if (q.includes('AS lt1h') && q.includes('AS h1to6') && q.includes('AS h6to24')) {
+      const t1h = this.boundParams[0] as number;
+      const t6h = this.boundParams[1] as number;
+      const t24h = this.boundParams[3] as number;
+      const t3d = this.boundParams[5] as number;
+      const t7d = this.boundParams[7] as number;
+      const events = Array.from(this.db.events.values());
+      const lt1h = events.filter((e) => e.created_at >= t1h).length;
+      const h1to6 = events.filter((e) => e.created_at >= t6h && e.created_at < t1h).length;
+      const h6to24 = events.filter((e) => e.created_at >= t24h && e.created_at < t6h).length;
+      const d1to3 = events.filter((e) => e.created_at >= t3d && e.created_at < t24h).length;
+      const d3to7 = events.filter((e) => e.created_at >= t7d && e.created_at < t3d).length;
+      return {
+        results: [{ lt1h, h1to6, h6to24, d1to3, d3to7 } as unknown as T],
+        success: true,
+        meta: createMockMeta({ rows_read: events.length }),
+      };
+    }
+
+    // Dashboard: Batch resolve profiles (kind 0)
+    if (q.includes('FROM events WHERE kind = 0 AND pubkey IN')) {
+      const pubkeys = (this.boundParams as string[]).map((p) => p.toLowerCase());
+      const matched = Array.from(this.db.events.values()).filter(
+        (e) => e.kind === 0 && pubkeys.includes(e.pubkey.toLowerCase())
+      );
+      return {
+        results: matched.map((e) => ({ pubkey: e.pubkey, raw_event: e.raw_event })) as unknown as T[],
+        success: true,
+        meta: createMockMeta({ rows_read: matched.length }),
+      };
+    }
+
+    // Dashboard B5: Age buckets count queries (legacy batch fallback)
     if (q.includes('FROM events WHERE created_at >=')) {
       if (q.includes('AND created_at < ?')) {
         const since = this.boundParams[0] as number;
@@ -311,10 +348,14 @@ export class MockD1PreparedStatement implements D1PreparedStatement {
     }
 
     // Dashboard C1 / C2: Leaderboard Posters / Sharers
-    if (q.includes('GROUP BY e.pubkey') && q.includes('FROM events e')) {
+    if (
+      (q.includes('GROUP BY e.pubkey') || q.includes('GROUP BY pubkey')) &&
+      (q.includes('FROM events') || q.includes('FROM events e')) &&
+      !q.includes('created_at <')
+    ) {
       const since = this.boundParams[0] as number;
-      const isKind1 = q.includes('e.kind = 1');
-      const isSharer = q.includes('e.kind IN (6, 16)');
+      const isKind1 = q.includes('kind = 1');
+      const isSharer = q.includes('kind IN (6, 16)');
       const counts = new Map<string, number>();
 
       for (const ev of this.db.events.values()) {
@@ -359,21 +400,20 @@ export class MockD1PreparedStatement implements D1PreparedStatement {
     }
 
     // Dashboard C3: Most Followed
-    if (q.includes('FROM event_tags t') && q.includes('JOIN events e') && q.includes('e.kind = 3') && q.includes('GROUP BY t.tag_value')) {
-      const followersMap = new Map<string, Set<string>>();
+    if (
+      q.includes('FROM event_tags') &&
+      !q.includes('JOIN events') &&
+      (q.includes("tag_name = 'p'") || q.includes('tag_name = "p"')) &&
+      (q.includes('GROUP BY t.tag_value') || q.includes('GROUP BY tag_value'))
+    ) {
+      const followersMap = new Map<string, number>();
       for (const t of this.db.eventTags) {
         if (t.tag_name === 'p') {
-          const parentEv = this.db.events.get(t.event_id);
-          if (parentEv && parentEv.kind === 3) {
-            if (!followersMap.has(t.tag_value)) {
-              followersMap.set(t.tag_value, new Set());
-            }
-            followersMap.get(t.tag_value)!.add(parentEv.pubkey);
-          }
+          followersMap.set(t.tag_value, (followersMap.get(t.tag_value) || 0) + 1);
         }
       }
       let sorted = Array.from(followersMap.entries())
-        .map(([pubkey, followerSet]) => {
+        .map(([pubkey, count]) => {
           const profile = Array.from(this.db.events.values()).find((e) => e.pubkey === pubkey && e.kind === 0);
           let display_name: string | null = null;
           let avatar_url: string | null = null;
@@ -389,7 +429,7 @@ export class MockD1PreparedStatement implements D1PreparedStatement {
           }
           return {
             pubkey,
-            count: followerSet.size,
+            count,
             display_name,
             avatar_url,
           };
@@ -422,7 +462,7 @@ export class MockD1PreparedStatement implements D1PreparedStatement {
     }
 
     // Dashboard D (Hot 5): Mention counts in window
-    if (q.includes('FROM event_tags t') && q.includes('WHERE t.tag_name = \'p\' AND e.created_at >=') && q.includes('GROUP BY t.tag_value')) {
+    if (q.includes('FROM event_tags') && q.includes('JOIN events') && (q.includes("tag_name = 'p'") || q.includes('tag_name = "p"')) && (q.includes('GROUP BY t.tag_value') || q.includes('GROUP BY tag_value'))) {
       const since = this.boundParams[0] as number;
       const until = this.boundParams[1] as number | undefined;
       const counts = new Map<string, number>();
