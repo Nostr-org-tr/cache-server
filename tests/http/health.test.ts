@@ -2,24 +2,29 @@ import { describe, expect, it } from 'vitest';
 import { handleHealthRequest, type HealthResponse } from '../../src/http/health';
 import type { Env } from '../../src/types/env';
 import { APP_VERSION } from '../../src/version';
-import { MockD1Database } from '../mocks/mock-d1';
+import { MockKVNamespace } from '../mocks/mock-kv';
 
 describe('HTTP /health Check Endpoint', () => {
-  it('should return HTTP 200 and healthy status when D1 database is connected', async () => {
-    const mockDb = new MockD1Database();
-    // Populate an event into mock DB
-    mockDb.events.set('event1', {
-      id: 'event1',
-      pubkey: 'pub1',
-      created_at: 1000,
-      kind: 1,
-      d_tag: null,
-      raw_event: '{}',
-      created_at_recorded: 1000,
-    });
+  it('should return HTTP 200 and healthy status when D1 database is connected with KV event count', async () => {
+    let countQueryCalled = false;
+    const mockDb = {
+      prepare: (sql: string) => {
+        if (sql.includes('COUNT(')) {
+          countQueryCalled = true;
+          throw new Error('COUNT(*) must never be called during health check');
+        }
+        return {
+          first: async () => ({ alive: 1 }),
+        };
+      },
+    } as unknown as D1Database;
+
+    const mockKv = new MockKVNamespace();
+    await mockKv.put('stats:summary', JSON.stringify({ total_events: 2014668 }));
 
     const env: Env = {
-      DB: mockDb as unknown as D1Database,
+      DB: mockDb,
+      CACHE_KV: mockKv as unknown as KVNamespace,
       CLIENT_SESSION: {} as unknown as DurableObjectNamespace<any>,
     };
 
@@ -29,6 +34,7 @@ describe('HTTP /health Check Endpoint', () => {
     expect(response.headers.get('Content-Type')).toBe('application/json; charset=utf-8');
     expect(response.headers.get('Access-Control-Allow-Origin')).toBe('*');
     expect(response.headers.get('Cache-Control')).toContain('no-cache');
+    expect(countQueryCalled).toBe(false);
 
     const json = (await response.json()) as HealthResponse;
     expect(json.status).toBe('healthy');
@@ -36,7 +42,7 @@ describe('HTTP /health Check Endpoint', () => {
     expect(json.version).toBe(APP_VERSION);
     expect(json.db.status).toBe('connected');
     expect(typeof json.db.latency_ms).toBe('number');
-    expect(json.db.event_count).toBe(1);
+    expect(json.db.event_count).toBe(2014668);
     expect(typeof json.timestamp).toBe('number');
   });
 

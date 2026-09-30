@@ -35,17 +35,17 @@ export async function handleHealthRequest(env: Env): Promise<Response> {
 
     const latencyMs = Math.round((performance.now() - start) * 100) / 100;
 
-    // Retrieve cached event count
+    // Retrieve cached event count from KV cache without running heavy table scans on D1
     let eventCount = 0;
-    try {
-      const countResult = await env.DB.prepare('SELECT COUNT(*) AS total FROM events').first<{
-        total: number;
-      }>();
-      if (countResult && typeof countResult.total === 'number') {
-        eventCount = countResult.total;
+    if (env.CACHE_KV) {
+      try {
+        const cached = await env.CACHE_KV.get('stats:summary', 'json');
+        if (cached && typeof cached === 'object' && typeof (cached as { total_events?: number }).total_events === 'number') {
+          eventCount = (cached as { total_events: number }).total_events;
+        }
+      } catch {
+        // Non-fatal if KV read fails
       }
-    } catch {
-      // Non-fatal if count query fails while probe passed
     }
 
     const payload: HealthResponse = {

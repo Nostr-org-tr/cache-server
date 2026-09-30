@@ -24,6 +24,7 @@ import {
 } from './queries';
 import { renderDashboardHtml } from './renderer';
 import type { DashboardData } from './types';
+import { buildDefaultStatsPayload, collectKvStats } from '../http/stats';
 
 // KV cache keys
 export const DASHBOARD_KV_KEY = 'dashboard:html';
@@ -111,11 +112,56 @@ export async function generateDashboard(env: Env): Promise<string | null> {
     const htmlBytes = new TextEncoder().encode(html).byteLength;
 
     if (env.CACHE_KV) {
+      const kvBinding = env.ENABLE_KV_CACHE === 'false' ? undefined : env.CACHE_KV;
+      const kvStats = await collectKvStats(kvBinding);
+
+      const vectorEnabled = env.VECTOR_SEARCH_ENABLED !== 'false';
+      const vectorStatus: 'active' | 'disabled' | 'unconfigured' =
+        !env.VECTOR_INDEX || !env.AI
+          ? 'unconfigured'
+          : vectorEnabled
+            ? 'active'
+            : 'disabled';
+
+      const statsPayload = buildDefaultStatsPayload(
+        env,
+        kvStats,
+        {
+          total_events: summary.total_events,
+          total_tags: summary.total_tags,
+          total_authors: summary.total_authors,
+          time_range: {
+            oldest_event_at: summary.oldest_event_at,
+            newest_event_at: summary.newest_event_at,
+          },
+          kind_distribution: kindDist.map((k) => ({
+            kind: k.kind,
+            name: k.name,
+            count: k.count,
+          })),
+          client_distribution: topClients.map((c) => ({
+            client: c.client,
+            count: c.count,
+          })),
+        },
+        {
+          status: vectorStatus,
+          indexed_vectors_count: summary.indexed_vectors,
+          total_indexable_events: summary.total_events,
+          embedding_model: env.VECTOR_EMBEDDING_MODEL || '@cf/baai/bge-m3',
+          dimensions: 1024,
+          metric: 'cosine',
+        }
+      );
+
       await Promise.allSettled([
         env.CACHE_KV.put(DASHBOARD_KV_KEY, html, {
           expirationTtl: DASHBOARD_KV_TTL_SECONDS,
         }),
         env.CACHE_KV.put(SUMMARY_KV_KEY, JSON.stringify(summary), {
+          expirationTtl: DASHBOARD_KV_TTL_SECONDS,
+        }),
+        env.CACHE_KV.put(STATS_KV_KEY, JSON.stringify(statsPayload), {
           expirationTtl: DASHBOARD_KV_TTL_SECONDS,
         }),
       ]);

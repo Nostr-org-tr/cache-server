@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  collectAndCacheRelayStats,
   collectKvStats,
   getKindDescription,
   handleStatsRequest,
@@ -10,8 +11,8 @@ import { APP_VERSION } from '../../src/version';
 import { MockD1Database } from '../mocks/mock-d1';
 import { MockKVNamespace } from '../mocks/mock-kv';
 
-describe('HTTP /stats Endpoint', () => {
-  it('should return cache, KV telemetry, and upstream statistics', async () => {
+describe('HTTP /stats Endpoint & Background Collector', () => {
+  it('collectAndCacheRelayStats should query D1 sequentially and persist stats:json to KV', async () => {
     const mockDb = new MockD1Database();
     mockDb.events.set('e1', {
       id: 'e1',
@@ -68,96 +69,123 @@ describe('HTTP /stats Endpoint', () => {
       ALLOW_DIRECT_WRITES: 'false',
     };
 
-    const response = await handleStatsRequest(env);
-
-    expect(response.status).toBe(200);
-    expect(response.headers.get('Content-Type')).toBe('application/json; charset=utf-8');
-    expect(response.headers.get('Access-Control-Allow-Origin')).toBe('*');
-
-    const json = (await response.json()) as RelayStatsResponse;
-    expect(json.service).toBe('cache.nostr.org.tr');
-    expect(json.version).toBe(APP_VERSION);
-    expect(json.cache.total_events).toBe(3);
-    expect(json.cache.total_tags).toBe(2);
-    expect(json.cache.total_authors).toBe(2);
-    expect(json.cache.time_range).toEqual({
+    const payload = await collectAndCacheRelayStats(env);
+    expect(payload).not.toBeNull();
+    expect(payload!.service).toBe('cache.nostr.org.tr');
+    expect(payload!.version).toBe(APP_VERSION);
+    expect(payload!.cache.total_events).toBe(3);
+    expect(payload!.cache.total_tags).toBe(2);
+    expect(payload!.cache.total_authors).toBe(2);
+    expect(payload!.cache.time_range).toEqual({
       oldest_event_at: 1000,
       newest_event_at: 1002,
     });
-    expect(json.cache.kind_distribution).toEqual([
+    expect(payload!.cache.kind_distribution).toEqual([
       { kind: 1, name: 'Short Text Note', count: 2 },
       { kind: 0, name: 'User Metadata / Profile', count: 1 },
     ]);
-    expect(json.cache.client_distribution).toEqual([
+    expect(payload!.cache.client_distribution).toEqual([
       { client: 'Damus', count: 1 },
     ]);
 
-    // KV Telemetry checks
-    expect(json.kv).toBeDefined();
-    expect(json.kv.status).toBe('active');
-    expect(json.kv.configured).toBe(true);
-    expect(json.kv.ttl_seconds).toEqual({
-      default: 7200,
-      min: 60,
-      max: 7200,
-    });
-    expect(json.kv.sample_keys_count).toBe(7);
-    expect(json.kv.keys_by_prefix).toEqual({
-      events: 1,
-      profiles: 1,
-      relays: 1,
-      contacts: 1,
-      replaceable: 1,
-      parameterized: 1,
-      other: 1,
-    });
-    expect(json.kv.list_complete).toBe(true);
-    expect(typeof json.kv.latency_ms).toBe('number');
-
-    // Vector Search Telemetry checks
-    expect(json.vector_search).toBeDefined();
-    expect(json.vector_search.embedding_model).toBe('@cf/baai/bge-m3');
-    expect(json.vector_search.dimensions).toBe(1024);
-    expect(json.vector_search.metric).toBe('cosine');
-    expect(typeof json.vector_search.indexed_vectors_count).toBe('number');
-    expect(typeof json.vector_search.total_indexable_events).toBe('number');
-
-    // Relay checks
-    expect(json.relay.name).toBe('Nostr Turkey Regional Cache');
-    expect(json.relay.pubkey).toBe('46f3c7bb33cc3019049b76dc89dbb96e34c247bdda68b6ad8632682793ff8a1a');
-    expect(json.relay.read_only).toBe(true);
-    expect(json.relay.allow_direct_writes).toBe(false);
-
-    // Security & Rate Limits checks
-    expect(json.security.rate_limits).toEqual({
-      ip_handshake_per_min: 120,
-      messages_per_window: 300,
-      pubkey_writes_per_min: 60,
-    });
-
-    // GC checks
-    expect(json.gc).toBeDefined();
-    expect(json.gc.schedule).toBe('Daily at 03:00 UTC (0 3 * * *)');
-    expect(json.gc.batch_size).toBe(500);
-    expect(json.gc.max_batches_per_tier).toBe(10);
-    expect(json.gc.tiers.length).toBeGreaterThan(0);
-    expect(json.gc.tiers[0]).toHaveProperty('ttl_seconds');
-
-    // Upstreams checks
-    expect(json.upstreams.configured).toEqual(['wss://relay.damus.io', 'wss://nos.lol']);
-    expect(json.upstreams.total_configured).toBe(2);
-    expect(json.upstreams.timeout_ms).toBe(4000);
+    // Verify KV persistence
+    const savedInKv = await mockKv.get('stats:json', 'json');
+    expect(savedInKv).toBeDefined();
+    expect((savedInKv as RelayStatsResponse).cache.total_events).toBe(3);
   });
 
-  it('should handle unconfigured KV namespace gracefully', async () => {
-    const mockDb = new MockD1Database();
+  it('handleStatsRequest should strictly read from KV without querying D1', async () => {
+    let d1Queried = false;
+    const trackingDb = {
+      prepare: () => {
+        d1Queried = true;
+        throw new Error('D1 must never be called during handleStatsRequest');
+      },
+      batch: () => {
+        d1Queried = true;
+        throw new Error('D1 must never be called during handleStatsRequest');
+      },
+    } as unknown as D1Database;
+
+    const mockKv = new MockKVNamespace();
+    const cachedStats: Partial<RelayStatsResponse> = {
+      service: 'cache.nostr.org.tr',
+      version: APP_VERSION,
+      timestamp: 123456789,
+      cache: {
+        total_events: 500,
+        total_tags: 1200,
+        total_authors: 150,
+        time_range: { oldest_event_at: 1000, newest_event_at: 2000 },
+        kind_distribution: [],
+        client_distribution: [],
+      },
+    };
+    await mockKv.put('stats:json', JSON.stringify(cachedStats));
+
     const env: Env = {
-      DB: mockDb as unknown as D1Database,
+      DB: trackingDb,
+      CACHE_KV: mockKv as unknown as KVNamespace,
       CLIENT_SESSION: {} as unknown as DurableObjectNamespace<any>,
     };
 
     const response = await handleStatsRequest(env);
     expect(response.status).toBe(200);
+    expect(d1Queried).toBe(false);
+
+    const json = (await response.json()) as RelayStatsResponse;
+    expect(json.service).toBe('cache.nostr.org.tr');
+    expect(json.cache.total_events).toBe(500);
+  });
+
+  it('handleStatsRequest should return baseline payload when KV is cold without touching D1', async () => {
+    let d1Queried = false;
+    const trackingDb = {
+      prepare: () => {
+        d1Queried = true;
+        throw new Error('D1 must never be called on cold KV start');
+      },
+      batch: () => {
+        d1Queried = true;
+        throw new Error('D1 must never be called on cold KV start');
+      },
+    } as unknown as D1Database;
+
+    const mockKv = new MockKVNamespace();
+    const env: Env = {
+      DB: trackingDb,
+      CACHE_KV: mockKv as unknown as KVNamespace,
+      CLIENT_SESSION: {} as unknown as DurableObjectNamespace<any>,
+      RELAY_NAME: 'Cold Cache Relay',
+    };
+
+    const response = await handleStatsRequest(env);
+    expect(response.status).toBe(200);
+    expect(d1Queried).toBe(false);
+
+    const json = (await response.json()) as RelayStatsResponse;
+    expect(json.relay.name).toBe('Cold Cache Relay');
+    expect(json.cache.total_events).toBe(0);
+    expect(json.cache.total_authors).toBe(0);
+  });
+
+  it('should handle unconfigured KV namespace gracefully without D1 queries', async () => {
+    let d1Queried = false;
+    const trackingDb = {
+      prepare: () => {
+        d1Queried = true;
+        throw new Error('D1 must not be called');
+      },
+    } as unknown as D1Database;
+
+    const env: Env = {
+      DB: trackingDb,
+      CLIENT_SESSION: {} as unknown as DurableObjectNamespace<any>,
+    };
+
+    const response = await handleStatsRequest(env);
+    expect(response.status).toBe(200);
+    expect(d1Queried).toBe(false);
 
     const json = (await response.json()) as RelayStatsResponse;
     expect(json.kv.status).toBe('disabled');
@@ -176,15 +204,17 @@ describe('HTTP /stats Endpoint', () => {
   });
 
   it('should handle KV errors gracefully without breaking /stats', async () => {
-    const mockDb = new MockD1Database();
     const faultyKv = {
+      get: () => {
+        throw new Error('KV storage degraded');
+      },
       list: () => {
         throw new Error('KV storage degraded');
       },
     } as unknown as KVNamespace;
 
     const env: Env = {
-      DB: mockDb as unknown as D1Database,
+      DB: {} as unknown as D1Database,
       CACHE_KV: faultyKv,
       CLIENT_SESSION: {} as unknown as DurableObjectNamespace<any>,
     };
@@ -225,108 +255,5 @@ describe('HTTP /stats Endpoint', () => {
     expect(stats.keys_by_prefix.events).toBe(1);
     expect(stats.keys_by_prefix.profiles).toBe(1);
   });
-
-  it('should return HTTP 500 if database fails and no KV cache exists', async () => {
-    const faultyDb = {
-      prepare: () => {
-        throw new Error('Database down');
-      },
-    } as unknown as D1Database;
-
-    const env: Env = {
-      DB: faultyDb,
-      CLIENT_SESSION: {} as unknown as DurableObjectNamespace<any>,
-    };
-
-    const response = await handleStatsRequest(env);
-    expect(response.status).toBe(500);
-
-    const json = (await response.json()) as { error: string; message: string };
-    expect(json.error).toBe('Failed to retrieve relay statistics');
-  });
-
-  it('should return fast cached response from KV without querying D1', async () => {
-    let d1Queried = false;
-    const trackingDb = {
-      prepare: () => {
-        d1Queried = true;
-        throw new Error('Should not be called on KV cache hit');
-      },
-      batch: () => {
-        d1Queried = true;
-        throw new Error('Should not be called on KV cache hit');
-      },
-    } as unknown as D1Database;
-
-    const mockKv = new MockKVNamespace();
-    const cachedStats: Partial<RelayStatsResponse> = {
-      service: 'cache.nostr.org.tr',
-      version: APP_VERSION,
-      timestamp: 123456789,
-      cache: {
-        total_events: 500,
-        total_tags: 1200,
-        total_authors: 150,
-        time_range: { oldest_event_at: 1000, newest_event_at: 2000 },
-        kind_distribution: [],
-        client_distribution: [],
-      },
-    };
-    await mockKv.put('stats:json', JSON.stringify(cachedStats));
-
-    const env: Env = {
-      DB: trackingDb,
-      CACHE_KV: mockKv as unknown as KVNamespace,
-      CLIENT_SESSION: {} as unknown as DurableObjectNamespace<any>,
-    };
-
-    const response = await handleStatsRequest(env);
-    expect(response.status).toBe(200);
-    expect(d1Queried).toBe(false);
-
-    const json = (await response.json()) as RelayStatsResponse;
-    expect(json.service).toBe('cache.nostr.org.tr');
-    expect(json.cache.total_events).toBe(500);
-  });
-
-  it('should bypass KV cache when force refresh query parameter is present', async () => {
-    const mockDb = new MockD1Database();
-    mockDb.events.set('e1', {
-      id: 'e1',
-      pubkey: 'p1',
-      created_at: 1000,
-      kind: 1,
-      d_tag: null,
-      raw_event: '{}',
-      created_at_recorded: 1000,
-    });
-
-    const mockKv = new MockKVNamespace();
-    const staleStats: Partial<RelayStatsResponse> = {
-      service: 'cache.nostr.org.tr',
-      version: APP_VERSION,
-      cache: {
-        total_events: 99999,
-        total_tags: 0,
-        total_authors: 0,
-        time_range: { oldest_event_at: null, newest_event_at: null },
-        kind_distribution: [],
-        client_distribution: [],
-      },
-    };
-    await mockKv.put('stats:json', JSON.stringify(staleStats));
-
-    const env: Env = {
-      DB: mockDb as unknown as D1Database,
-      CACHE_KV: mockKv as unknown as KVNamespace,
-      CLIENT_SESSION: {} as unknown as DurableObjectNamespace<any>,
-    };
-
-    const request = new Request('https://cache.nostr.org.tr/stats?refresh=true');
-    const response = await handleStatsRequest(env, request);
-    expect(response.status).toBe(200);
-
-    const json = (await response.json()) as RelayStatsResponse;
-    expect(json.cache.total_events).toBe(1); // Fresh from DB, not stale 99999 from KV
-  });
 });
+

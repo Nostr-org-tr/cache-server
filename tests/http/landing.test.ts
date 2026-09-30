@@ -89,4 +89,47 @@ describe('Landing Page Renderer & Handler', () => {
     expect(body).toContain('cache.nostr.org.tr');
     expect(body).toContain('nostr.org.tr');
   });
+
+  it('should read summary telemetry from KV cache and never query D1', async () => {
+    let d1Queried = false;
+    const trackingDb = {
+      prepare: () => {
+        d1Queried = true;
+        throw new Error('D1 must never be called during landing request');
+      },
+    } as unknown as D1Database;
+
+    const mockKvStore = new Map<string, string>();
+    mockKvStore.set(
+      'stats:summary',
+      JSON.stringify({
+        total_events: 50000,
+        total_authors: 1200,
+        total_tags: 150000,
+        indexed_vectors: 3000,
+      })
+    );
+    const mockKvNamespace = {
+      get: async (key: string) => {
+        const val = mockKvStore.get(key);
+        return val ? JSON.parse(val) : null;
+      },
+    } as unknown as KVNamespace;
+
+    const env: Env = {
+      DB: trackingDb,
+      CACHE_KV: mockKvNamespace,
+      CLIENT_SESSION: {} as unknown as DurableObjectNamespace<any>,
+    };
+
+    const request = new Request('https://cache.nostr.org.tr/');
+    const response = await handleLandingRequest(request, env);
+    expect(response.status).toBe(200);
+    expect(d1Queried).toBe(false);
+
+    const body = await response.text();
+    expect(body).toContain('50.0K+');
+    expect(body).toContain('1.2K+');
+    expect(body).toContain('150.0K+');
+  });
 });
